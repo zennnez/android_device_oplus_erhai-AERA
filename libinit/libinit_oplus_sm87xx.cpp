@@ -81,6 +81,7 @@ void SetupModelProperties(const ModelInfo& info, const std::string& region) {
         {"ro.product.name",             name.c_str()},
         {"vendor.display.enable_spr",   info.supportSpr},
         {"ro.twrp.device_version",      info.twversion},
+        {"ro.aera.device_version",      info.twversion},
         {"ro.build.date.utc",           "0"},
     };
     for (const auto& p : props) {
@@ -112,9 +113,11 @@ void vendor_load_properties() {
 
     SetupModelProperties(model_info->second, region_suffix_iter->second);
 
-    // Set a prop to handle rotation
+    // Set props to handle tablet rotation
     if (prjname == 24926) {
         OverrideProperty("persist.twrp.rotation", "270");
+        OverrideProperty("persist.aera.rotation", "270");
+        OverrideProperty("ro.sf.hwrotation", "270");
     }
     // Set a prop to handle strongbox
     switch (prjname) {

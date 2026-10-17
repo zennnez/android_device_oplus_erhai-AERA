@@ -3,6 +3,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
+# Copyright (C) 2024-2026 The AERA Recovery Project
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+DEVICE_PATH := device/oneplus/sm87xx
 
 # Building with minimal manifest
 ALLOW_MISSING_DEPENDENCIES                      := true
@@ -16,9 +21,37 @@ BUILD_BROKEN_PLUGIN_VALIDATION      := soong-libaosprecovery_defaults soong-libg
 TARGET_ARCH                 := arm64
 TARGET_ARCH_VARIANT         := armv8-a
 TARGET_CPU_ABI              := arm64-v8a
-TARGET_CPU_VARIANT          := oryon
+TARGET_CPU_VARIANT          := generic
+TARGET_CPU_VARIANT_RUNTIME  := oryon
+
+# Power
+ENABLE_CPUSETS := true
+ENABLE_SCHEDBOOST := true
+
+# Bootloader
+PRODUCT_PLATFORM                := sun
+TARGET_BOOTLOADER_BOARD_NAME    := $(PRODUCT_RELEASE_NAME)
+TARGET_NO_BOOTLOADER            := true
+
+# Platform
+TARGET_BOARD_PLATFORM           := sm8750
+TARGET_BOARD_PLATFORM_GPU       := qcom-adreno830
+QCOM_BOARD_PLATFORMS            += sm8750 sm87xx
+
+# Kernel
+TARGET_KERNEL_ARCH            := arm64
+TARGET_KERNEL_HEADER_ARCH     := arm64
+BOARD_KERNEL_IMAGE_NAME       := Image
+BOARD_BOOT_HEADER_VERSION     := 4
+BOARD_KERNEL_PAGESIZE         := 4096
+TARGET_PREBUILT_KERNEL        := kernel/prebuilts/6.6/arm64/kernel-6.6
+BOARD_MKBOOTIMG_ARGS          += --header_version $(BOARD_BOOT_HEADER_VERSION)
+BOARD_MKBOOTIMG_ARGS          += --pagesize $(BOARD_KERNEL_PAGESIZE)
+
+BOARD_RAMDISK_USE_LZ4         := true
 
 # A/B
+AB_OTA_UPDATER := true
 AB_OTA_PARTITIONS := \
     boot \
     init_boot \
@@ -48,64 +81,64 @@ AB_OTA_PARTITIONS += \
     my_region \
     my_stock
 
-# Bootloader
-PRODUCT_PLATFORM                := sun
-TARGET_BOOTLOADER_BOARD_NAME    := sun
+# Verified Boot
+BOARD_AVB_ENABLE := true
 
-# Crypto
-BOARD_USES_METADATA_PARTITION   := true
-TW_INCLUDE_CRYPTO               := true
-TW_INCLUDE_OMAPI                := true
+# Partitions
+BOARD_PROPERTY_OVERRIDES_SPLIT_ENABLED  := true
+BOARD_RECOVERYIMAGE_PARTITION_SIZE      := 104857600
 
-# Debug
-TARGET_USES_LOGD                := true
-TWRP_INCLUDE_LOGCAT             := true
-TARGET_RECOVERY_DEVICE_MODULES  += debuggerd
-TARGET_RECOVERY_DEVICE_MODULES  += strace
-RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/debuggerd
-RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/strace
+# Dynamic Partition
+BOARD_SUPER_PARTITION_SIZE                  := 15569256448
+BOARD_SUPER_PARTITION_GROUPS                := qti_dynamic_partitions
+BOARD_QTI_DYNAMIC_PARTITIONS_SIZE           := 15565062144
+BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := \
+    system system_ext product vendor vendor_dlkm odm
+BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST += \
+    my_bigball my_carrier my_company my_engineering my_heytap my_manifest my_preload my_product my_region my_stock
+
+BOARD_PARTITION_LIST := $(call to-upper, $(BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST))
+$(foreach p, $(BOARD_PARTITION_LIST), $(eval BOARD_$(p)IMAGE_FILE_SYSTEM_TYPE := erofs))
+$(foreach p, $(BOARD_PARTITION_LIST), $(eval TARGET_COPY_OUT_$(p) := $(call to-lower, $(p))))
+BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := ext4
+BOARD_ODMIMAGE_FILE_SYSTEM_TYPE         := ext4
+TARGET_COPY_OUT_ODM                     := odm
+TARGET_COPY_OUT_VENDOR                  := vendor
 
 # File systems
-TARGET_USERIMAGES_USE_F2FS := true
-TW_USE_DMCTL               := true
+BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := f2fs
+TARGET_USERIMAGES_USE_EXT4           := true
+TARGET_USERIMAGES_USE_F2FS           := true
+TW_USE_DMCTL                         := true
+
+# Crypto
+BOARD_USES_METADATA_PARTITION        := true
+BOARD_USES_QCOM_FBE_DECRYPTION       := true
+AERA_INCLUDE_CRYPTO                  := true
+AERA_INCLUDE_CRYPTO_FBE              := true
+AERA_INCLUDE_FBE_METADATA_DECRYPT    := true
+AERA_USE_FSCRYPT_POLICY              := 2
+TW_INCLUDE_CRYPTO                    := true
 
 # Init
 TARGET_INIT_VENDOR_LIB          := //$(DEVICE_PATH):libinit_oplus_sm87xx
 TARGET_RECOVERY_DEVICE_MODULES  := libinit_oplus_sm87xx
 
-# Kernel
-BOARD_KERNEL_IMAGE_NAME     := Image
-BOARD_BOOT_HEADER_VERSION   := 4
-BOARD_KERNEL_PAGESIZE       := 4096
-BOARD_MKBOOTIMG_ARGS        += --header_version $(BOARD_BOOT_HEADER_VERSION)
-BOARD_MKBOOTIMG_ARGS        += --pagesize $(BOARD_KERNEL_PAGESIZE)
-
-BOARD_RAMDISK_USE_LZ4       := true
-
-# Partitions
-BOARD_PROPERTY_OVERRIDES_SPLIT_ENABLED  := true
-BOARD_RECOVERYIMAGE_PARTITION_SIZE      := 0x6400000
-
-BOARD_SUPER_PARTITION_SIZE                  := 15569256448
-BOARD_SUPER_PARTITION_GROUPS                := qti_dynamic_partitions
-BOARD_QTI_DYNAMIC_PARTITIONS_SIZE           := 15565062144
-BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext product vendor vendor_dlkm odm
-BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST += my_bigball my_carrier my_company my_engineering my_heytap my_manifest my_preload my_product my_region my_stock
-
-BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := ext4
-TARGET_COPY_OUT_ODM             := odm
-TARGET_COPY_OUT_VENDOR          := vendor
-
-# Platform
-TARGET_BOARD_PLATFORM   := sm87xx
-QCOM_BOARD_PLATFORMS    += sm87xx
-
 # Recovery
-BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE    := true
-TARGET_RECOVERY_PIXEL_FORMAT                := RGBX_8888
-TW_INCLUDE_FASTBOOTD                        := true
+BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true
+TARGET_RECOVERY_PIXEL_FORMAT             := RGBX_8888
+AERA_INCLUDE_FASTBOOTD                   := true
+AERA_SKIP_ADDITIONAL_FSTAB               := true
+AERA_UI_ADAPTIVE_RESOLUTION              := true
+TW_INCLUDE_FASTBOOTD                     := true
 
 # Tool
+AERA_INCLUDE_LIBRESETPROP     := true
+AERA_INCLUDE_LPDUMP           := true
+AERA_INCLUDE_LPTOOLS          := true
+AERA_INCLUDE_REPACKTOOLS      := true
+AERA_INCLUDE_RESETPROP        := true
+AERA_USE_TOOLBOX              := true
 TW_ENABLE_ALL_PARTITION_TOOLS := true
 TW_INCLUDE_7ZA                := true
 TW_INCLUDE_REPACKTOOLS        := true
@@ -113,17 +146,42 @@ TW_INCLUDE_RESETPROP          := true
 TW_USE_TOOLBOX                := true
 TW_INCLUDE_ZSTD               := true
 
-# TWRP display
-TW_BRIGHTNESS_PATH      := /sys/class/backlight/panel0-backlight/brightness
-TW_DEFAULT_BRIGHTNESS   := 1000
-TW_FRAMERATE            := 120
-TW_MAX_BRIGHTNESS       := 2047
-TW_SCREEN_BLANK_ON_BOOT := true
-TW_THEME                := portrait_hdpi
+# Debug
+TARGET_USES_LOGD                := true
+AERA_INCLUDE_LOGCAT             := true
+TWRP_INCLUDE_LOGCAT             := true
+TARGET_RECOVERY_DEVICE_MODULES  += debuggerd
+TARGET_RECOVERY_DEVICE_MODULES  += strace
+RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/debuggerd
+RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/strace
 
-# TWRP file system
+# AERA display
+AERA_BRIGHTNESS_PATH      := "/sys/class/backlight/panel0-backlight/brightness"
+AERA_DEFAULT_BRIGHTNESS   := 1000
+AERA_FRAMERATE            := 144
+AERA_MAX_BRIGHTNESS       := 2047
+AERA_NO_SCREEN_BLANK      := true
+AERA_SCREEN_BLANK_ON_BOOT := true
+AERA_THEME                := portrait_hdpi
+TARGET_USES_VULKAN        := true
+
+# Legacy TWRP display aliases
+TW_BRIGHTNESS_PATH      := $(AERA_BRIGHTNESS_PATH)
+TW_DEFAULT_BRIGHTNESS   := $(AERA_DEFAULT_BRIGHTNESS)
+TW_FRAMERATE            := $(AERA_FRAMERATE)
+TW_MAX_BRIGHTNESS       := $(AERA_MAX_BRIGHTNESS)
+TW_SCREEN_BLANK_ON_BOOT := true
+TW_NO_SCREEN_BLANK      := true
+TW_THEME                := $(AERA_THEME)
+
+# AERA file system
 RECOVERY_SDCARD_ON_DATA     := true
 TARGET_USES_MKE2FS          := true
+AERA_ENABLE_FS_COMPRESSION  := true
+AERA_INCLUDE_FUSE_EXFAT     := true
+AERA_INCLUDE_FUSE_NTFS      := true
+AERA_INCLUDE_NTFS_3G        := true
+AERA_NO_EXFAT_FUSE          := true
 TW_ENABLE_FS_COMPRESSION    := true
 TW_INCLUDE_FUSE_EXFAT       := true
 TW_INCLUDE_FUSE_NTFS        := true
@@ -131,26 +189,36 @@ TW_INCLUDE_NTFS_3G          := true
 TW_NO_EXFAT_FUSE            := true
 
 # Version
-PLATFORM_VERSION                := 99.87.36
-PLATFORM_VERSION_LAST_STABLE    := $(PLATFORM_VERSION)
-PLATFORM_SECURITY_PATCH         := 2099-12-31
-VENDOR_SECURITY_PATCH           := $(PLATFORM_SECURITY_PATCH)
-TW_DEVICE_VERSION               := OPLUS-SM87XX
-
-# Verified Boot
-BOARD_AVB_ENABLE := true
+PLATFORM_VERSION             := 99.87.36
+PLATFORM_VERSION_LAST_STABLE := $(PLATFORM_VERSION)
+PLATFORM_SECURITY_PATCH      := 2099-12-31
+VENDOR_SECURITY_PATCH        := $(PLATFORM_SECURITY_PATCH)
+BOOT_SECURITY_PATCH          := $(PLATFORM_SECURITY_PATCH)
+AERA_DEVICE_VERSION          := OnePlus_Pad2Pro
+TW_DEVICE_VERSION            := $(AERA_DEVICE_VERSION)
 
 # Vibrator
-TW_SUPPORT_INPUT_AIDL_HAPTICS := true
+AERA_SUPPORT_INPUT_AIDL_HAPTICS := true
+TW_SUPPORT_INPUT_AIDL_HAPTICS   := true
 
-# Other TWRP Configurations
+# Other AERA configurations
 TARGET_RECOVERY_QCOM_RTC_FIX            := true
-TW_CUSTOM_CPU_TEMP_PATH                 := "/sys/class/thermal/thermal_zone45/temp" # CPU-0-0-0
-TW_EXCLUDE_APEX                         := true
-TW_EXCLUDE_DEFAULT_USB_INIT             := true
-TW_EXTRA_LANGUAGES                      := true
-TW_LOAD_VENDOR_MODULES                  := "adsp_loader_dlkm.ko oplus_chg_v2.ko stm_st54se_gpio.ko nxp-nci.ko"
+AERA_CUSTOM_CPU_TEMP_PATH               := "/sys/class/thermal/thermal_zone45/temp" # CPU-0-0-0
+TW_CUSTOM_CPU_TEMP_PATH                 := $(AERA_CUSTOM_CPU_TEMP_PATH)
+AERA_EXCLUDE_APEX                       := true
+AERA_EXCLUDE_DEFAULT_USB_INIT           := true
+AERA_DEFAULT_LANGUAGE                   := en
+AERA_EXTRA_LANGUAGES                    := true
+AERA_LOAD_VENDOR_MODULES                := "oplus_bsp_synaptics_tcm2.ko oplus_bsp_tp_common.ko oplus_bsp_tp_custom.ko oplus_bsp_tp_focal_common.ko oplus_bsp_tp_ft3518.ko oplus_bsp_tp_ft3658u_spi.ko oplus_bsp_tp_ft3681.ko oplus_bsp_tp_ft3683g.ko oplus_bsp_tp_ft8057p.ko oplus_bsp_tp_goodix_comnon.ko oplus_bsp_tp_gt9916.ko oplus_bsp_tp_gt9966.ko oplus_bsp_tp_ilitek7807s.ko oplus_bsp_tp_ilitek_common.ko oplus_bsp_tp_notify.ko oplus_bsp_tp_novatek_common.ko oplus_bsp_tp_nt36528_noflash.ko oplus_bsp_tp_nt36532_noflash.ko oplus_bsp_tp_nt36672c_noflash.ko oplus_bsp_tp_syna_common.ko oplus_bsp_tp_tcm_S3908.ko oplus_bsp_tp_tcm_S3910.ko oplus_bsp_tp_td4377_noflash.ko q6_notifier_dlkm.ko spf_core_dlkm.ko audpkt_ion_dlkm.ko gpr_dlkm.ko audio_pkt_dlkm.ko q6_dlkm.ko adsp_loader_dlkm.ko audio_prm_dlkm.ko q6_pdr_dlkm.ko pinctrl_lpi_dlkm.ko swr_dlkm.ko swr_ctrl_dlkm.ko snd_event_dlkm.ko wcd_core_dlkm.ko mbhc_dlkm.ko sdca_registers_dlkm.ko wcd9xxx_dlkm.ko stub_dlkm.ko swr_dmic_dlkm.ko swr_haptics_dlkm.ko hdmi_dlkm.ko lpass_cdc_wsa2_macro_dlkm.ko lpass_cdc_wsa_macro_dlkm.ko lpass_cdc_va_macro_dlkm.ko lpass_cdc_rx_macro_dlkm.ko lpass_cdc_tx_macro_dlkm.ko lpass_cdc_dlkm.ko wsa884x_dlkm.ko wsa883x_dlkm.ko wcd938x_dlkm.ko wcd938x_slave_dlkm.ko wcd939x_dlkm.ko wcd939x_slave_dlkm.ko wcd9378_dlkm.ko wcd9378_slave_dlkm.ko lpass_bt_swr_dlkm.ko machine_dlkm.ko oplus_audio_aw882xx.ko frpc-adsprpc.ko oplus_chg_v2.ko stm_st54se_gpio.ko nxp-nci.ko smem-mailbox.ko cnss_prealloc.ko cnss_utils.ko cnss_plat_ipc_qmi_svc.ko cnss_nl.ko wlan_firmware_service.ko cnss2.ko msm_kgsl.ko"
+AERA_POST_DECRYPT_MODULES               := "rfkill.ko cfg80211.ko gsim.ko rmnet_mem.ko ipam.ko qca_cld3_peach_v2.ko btpower.ko btfmcodec.ko bt_fm_swr.ko"
+AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI    := true
+AERA_USE_SERIALNO_PROPERTY_FOR_DEVICE_ID := true
+AERA_INPUT_BLACKLIST                    := "hbtp_vm"
+TW_LOAD_VENDOR_MODULES                  := $(AERA_LOAD_VENDOR_MODULES)
+TW_POST_DECRYPT_MODULES                 := $(AERA_POST_DECRYPT_MODULES)
 TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI      := true
-TW_NO_SCREEN_BLANK                      := true
 TW_USE_SERIALNO_PROPERTY_FOR_DEVICE_ID  := true
-TW_NO_NETWORK                           := true
+
+# se_omapi
+AERA_INCLUDE_OMAPI := true
+TW_INCLUDE_OMAPI   := true

@@ -25,9 +25,22 @@
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-on early-fs
-    write /proc/sys/walt/sched_lib_name "recovery,Updater,updater,update_engine_sideload"
-    write /proc/sys/walt/sched_lib_mask_force 255
+import /init.recovery.wifi.rc
+
+on early-init
+    # Enable Qualcomm's Mapper5/SnapAlloc path before the allocator starts.
+    # This produces native buffers importable by both Adreno EGL and KMS.
+    setprop vendor.gralloc.enable_snapalloc true
+    start vendor.gatekeeper_default
+
+# Qualcomm EGL imports gralloc-native buffers. This root recovery rc is parsed
+# before recovery starts, unlike late vendor init fragments in this ramdisk.
+service aera-graphics-allocator /vendor/bin/hw/vendor.qti.hardware.display.allocator-service
+    class hal
+    seclabel u:r:recovery:s0
+    user root
+    group root graphics
+    capabilities SYS_NICE
 
 service post-boot-script /system/bin/sh -c /vendor/bin/init.kernel.post_boot-sun_default_6_2.sh
     user root
@@ -35,11 +48,68 @@ service post-boot-script /system/bin/sh -c /vendor/bin/init.kernel.post_boot-sun
     oneshot
     seclabel u:r:recovery:s0
 
+# The installed vendor supplies these ABI-matched Qualcomm daemons.
+# Keep them disabled until AERA has mounted vendor and firmware, then start
+# them through init so SELinux performs the stock executable transitions.
+service aera-pd-mapper /vendor/bin/aera-pd-mapper
+    class core
+    disabled
+    seclabel u:r:recovery:s0
+    user system
+    group system
+    setenv LD_LIBRARY_PATH /vendor/aera-audio-abi:/vendor/aera-stock-lib64:/vendor/lib64:/system/lib64
+
+service aera-dspservice /vendor/bin/aera-dspservice
+    class hal
+    disabled
+    seclabel u:r:recovery:s0
+    user system
+    group system wakelock oem_2908
+    capabilities BLOCK_SUSPEND
+    setenv LD_LIBRARY_PATH /vendor/aera-audio-abi:/vendor/aera-stock-lib64:/vendor/lib64:/system/lib64
+    interface aidl vendor.qti.hardware.dsp.IDspService/default
+
+service aera-audioadsprpcd /vendor/bin/aera-audioadsprpcd audiopd adsp
+    class main
+    disabled
+    seclabel u:r:recovery:s0
+    user media
+    group media
+    setenv LD_LIBRARY_PATH /vendor/aera-audio-abi:/vendor/aera-stock-lib64:/vendor/lib64:/system/lib64
+
+# Keep AGM in its own init process group. A child forked by the one-shot
+# bootstrap would be killed automatically as soon as that bootstrap exits.
+service aera-agm-service /system/bin/aera-audio-service --dodge-stock-agm
+    class main
+    disabled
+    seclabel u:r:recovery:s0
+    user root
+    group root system audio media wakelock
+    setenv LD_LIBRARY_PATH /vendor/aera-audio-abi:/vendor/aera-stock-lib64:/vendor/lib64:/system/lib64
+    setenv ANDROID_ROOT /system
+    setenv ANDROID_DATA /data
+    interface aidl vendor.qti.hardware.agm.IAGM/default
+    interface aidl vendor.qti.hardware.pal.IPAL/default
+
+# Start the audio DSP while SPF's deferred-probe window is still open. The
+# browser bridge may invoke the same idempotent bootstrap later; it will wait
+# for this instance or reuse the running AGM service.
+service aera-audio-bootstrap /system/bin/aera-audio-bootstrap
+    class core
+    disabled
+    oneshot
+    seclabel u:r:recovery:s0
+    user root
+    group root system audio media wakelock
+
+on early-fs
+    write /proc/sys/walt/sched_lib_name "recovery,Updater,updater,update_engine_sideload"
+    write /proc/sys/walt/sched_lib_mask_force 255
+
 on init
     setprop sys.usb.configfs 1
     setprop prepdecrypt.setpatch true
     start vendor.boot-qti
-    start vendor.gatekeeper_default
 
 on property:ro.boot.usbcontroller=*
     setprop sys.usb.controller ${ro.boot.usbcontroller}
@@ -72,6 +142,15 @@ on twrp_secure_element && property:twrp.se.no_sb=false
     enable vendor.weaver_nxp
     enable vendor.secure_element
 
+on property:twrp.fastboot.mode=1
+    start vendor.oplus.vibrator
+
+# Audio mounts the installed stock logical partitions. Start it only after
+# FBE succeeds so it cannot interfere with prepdecrypt or gatekeeper/weaver.
+on property:post.decrypt.modules=true
+    start aera-audio-bootstrap
+
 on property:vendor.sys.listeners.registered=true
     setprop sys.boot_completed 1
     start vendor.ssgtzd
+    start vendor.keymint-strongbox

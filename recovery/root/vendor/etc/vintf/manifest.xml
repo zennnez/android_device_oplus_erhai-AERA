@@ -7,6 +7,10 @@
         <name>android.hardware.gatekeeper</name>
         <fqname>IGatekeeper/default</fqname>
     </hal>
+    <hal format="aidl">
+        <name>vendor.qti.hardware.dsp</name>
+        <fqname>IDspService/default</fqname>
+    </hal>
     <sepolicy>
         <version>202404</version>
     </sepolicy>

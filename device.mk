@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
+DEVICE_PATH := device/oneplus/sm87xx
+
 # Configure base.mk
 $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
 
@@ -31,6 +33,19 @@ PRODUCT_USE_DYNAMIC_PARTITIONS := true
 PRODUCT_OTA_ENFORCE_VINTF_KERNEL_REQUIREMENTS   := false
 PRODUCT_ENABLE_UFFD_GC                          := true
 
+# AERA recovery packages
+PRODUCT_PACKAGES += \
+    aera-audio-bridge \
+    aera-audio-service \
+    aera-browser-jail \
+    lpflash \
+    lpmake \
+    lpunpack
+
+# Adreno 830 graphics backend
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.hardware.egl=adreno
+
 # OTA certs
 PRODUCT_EXTRA_RECOVERY_KEYS += \
 	$(DEVICE_PATH)/security/local_OTA \
@@ -38,3 +53,6 @@ PRODUCT_EXTRA_RECOVERY_KEYS += \
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += $(DEVICE_PATH)
+
+# AERA-specific settings
+$(call inherit-product, $(DEVICE_PATH)/aera_sm87xx.mk)
