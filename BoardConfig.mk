@@ -47,7 +47,6 @@ BOARD_KERNEL_PAGESIZE         := 4096
 TARGET_PREBUILT_KERNEL        := kernel/prebuilts/6.6/arm64/kernel-6.6
 BOARD_MKBOOTIMG_ARGS          += --header_version $(BOARD_BOOT_HEADER_VERSION)
 BOARD_MKBOOTIMG_ARGS          += --pagesize $(BOARD_KERNEL_PAGESIZE)
-BOARD_KERNEL_CMDLINE          := androidboot.selinux=permissive
 
 BOARD_RAMDISK_USE_LZ4         := true
 
@@ -157,7 +156,6 @@ RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/debuggerd
 RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/strace
 
 # AERA display
-TARGET_RECOVERY_DEFAULT_ROTATION := ROTATION_LEFT
 AERA_BRIGHTNESS_PATH      := /sys/class/backlight/panel0-backlight/brightness
 AERA_DEFAULT_BRIGHTNESS   := 1000
 AERA_FRAMERATE            := 144
@@ -168,7 +166,6 @@ AERA_THEME                := portrait_hdpi
 TARGET_USES_VULKAN        := true
 
 # Legacy TWRP display aliases
-TW_ROTATION             := 270
 TW_BRIGHTNESS_PATH      := $(AERA_BRIGHTNESS_PATH)
 TW_DEFAULT_BRIGHTNESS   := $(AERA_DEFAULT_BRIGHTNESS)
 TW_FRAMERATE            := $(AERA_FRAMERATE)
