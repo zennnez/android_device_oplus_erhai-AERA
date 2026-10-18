@@ -21,5 +21,3 @@ PRODUCT_GMS_CLIENTID_BASE := android-oplus
 # Theme
 AERA_STATUS_ICONS_ALIGN := center
 TW_STATUS_ICONS_ALIGN   := center
-TW_Y_OFFSET             := 111
-TW_H_OFFSET             := -111

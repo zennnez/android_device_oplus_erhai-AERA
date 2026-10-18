@@ -18,7 +18,6 @@
 - [x] Adreno 830 GPU hardware acceleration
 - [x] Recovery Audio DSP & AGM service bridge
 - [x] WLAN firmware & network connectivity
-- [x] Tablet 270° orientation support for OnePlus Pad 2 Pro
 - [x] FBE decryption & strongbox keymint
 - [x] Fastbootd & slotted image flashing
 - [x] ADB & MTP / OTG storage

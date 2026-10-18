@@ -113,12 +113,6 @@ void vendor_load_properties() {
 
     SetupModelProperties(model_info->second, region_suffix_iter->second);
 
-    // Set props to handle tablet rotation
-    if (prjname == 24926) {
-        OverrideProperty("persist.twrp.rotation", "270");
-        OverrideProperty("persist.aera.rotation", "270");
-        OverrideProperty("ro.sf.hwrotation", "270");
-    }
     // Set a prop to handle strongbox
     switch (prjname) {
         case 24851:
