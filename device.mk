@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-DEVICE_PATH := device/oneplus/sm87xx
+DEVICE_PATH := device/oneplus/erhai
 
 # Configure base.mk
 $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
@@ -55,4 +55,4 @@ PRODUCT_EXTRA_RECOVERY_KEYS += \
 PRODUCT_SOONG_NAMESPACES += $(DEVICE_PATH)
 
 # AERA-specific settings
-$(call inherit-product, $(DEVICE_PATH)/aera_sm87xx.mk)
+$(call inherit-product, $(DEVICE_PATH)/aera_erhai.mk)

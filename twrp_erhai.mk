@@ -4,14 +4,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-DEVICE_PATH := device/oneplus/sm87xx
+DEVICE_PATH := device/oneplus/erhai
 
 # Inherit from device.mk configuration
 $(call inherit-product, $(DEVICE_PATH)/device.mk)
 
 ## Device identifier
-PRODUCT_DEVICE       := sm87xx
-PRODUCT_NAME         := twrp_sm87xx
+PRODUCT_DEVICE       := erhai
+PRODUCT_NAME         := twrp_erhai
 PRODUCT_BRAND        := oneplus
 PRODUCT_MODEL        := OnePlus Pad 2 Pro
 PRODUCT_MANUFACTURER := oneplus

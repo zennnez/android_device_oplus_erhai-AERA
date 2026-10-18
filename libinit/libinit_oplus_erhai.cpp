@@ -52,7 +52,7 @@ const std::unordered_map<int, ModelInfo> kModelInfoMap = {
     {25600, {"realme",  "RE6400L1", "realme",  "RMX6699", "RMX6699", "Realme_GT_8",         "0"}}, // RMX6699 CN
     {24926, {"OnePlus", "OP615EL1", "OnePlus", "OPD2413", "OPD2413", "OnePlus_Pad2Pro",     "0"}}, // ossi CN
     {24976, {"OnePlus", "OP615EL1", "OnePlus", "OPD2413", "OPD2413", "OnePlus_Pad2Pro",     "0"}}, // ossi Pad 2 Pro
-    {0,     {"OPLUS",   "SM87XX",   "OPLUS",   "SM87XX",  "SM87XX",  "SM87XX",              "0"}}, // Default
+    {0,     {"OPLUS",   "ERHAI",    "OPLUS",   "ERHAI",   "ERHAI",   "ERHAI",               "0"}}, // Default
 };
 
 /*

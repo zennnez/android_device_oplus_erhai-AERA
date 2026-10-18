@@ -6,6 +6,6 @@
 
 LOCAL_PATH := $(call my-dir)
 
-ifeq ($(TARGET_DEVICE),sm87xx)
+ifeq ($(TARGET_DEVICE),erhai)
 include $(call all-subdir-makefiles,$(LOCAL_PATH))
 endif

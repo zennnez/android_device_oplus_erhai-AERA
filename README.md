@@ -34,19 +34,19 @@ repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
 ### 2. Device Tree Placement
 Place this repository under:
 ```bash
-device/oneplus/sm87xx
+device/oneplus/erhai
 ```
 
 ### 3. Build AERA Recovery Image
 ```bash
 source build/envsetup.sh
-lunch twrp_sm87xx-eng
+lunch twrp_erhai-bp2a-eng
 mka adbd recoveryimage
 ```
 
 The output image will be located at:
 ```bash
-out/target/product/sm87xx/recovery.img
+out/target/product/erhai/recovery.img
 ```
 
 ## Flashing

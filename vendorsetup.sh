@@ -5,7 +5,7 @@
 #	This software is released under GPL version 3 or any later version.
 #	See <http://www.gnu.org/licenses/>.
 #
-FDEVICE="sm87xx"
+FDEVICE="erhai"
 
 aera_get_target_device() {
 local chkdev=$(echo "$BASH_SOURCE" | grep -w $FDEVICE)
@@ -50,8 +50,8 @@ if [ "$1" = "$FDEVICE" -o "$AERA_BUILD_DEVICE" = "$FDEVICE" ]; then
 	export AERA_MISCELLANEOUS_ROOT_DIRECTORY=/sdcard
 	export AERA_ALLOW_EARLY_SETTINGS_LOAD=1
 
-	# Device targets for OnePlus Pad 2 Pro & SM8750 series
-	export TARGET_DEVICE_ALT="OPD2413,OP615EL1,OnePlus_Pad2Pro,PJZ110,OP5D55L1,OP5D0DL1,CPH2649,CPH2653,CPH2655,PKX110,CPH2723,PKR110,PLQ110,PLU110,RMX5010,RMX5090,RMX5011,RMX6699,sm87xx"
+	# Device targets for OnePlus Pad 2 Pro (erhai) & SM8750 series
+	export TARGET_DEVICE_ALT="OPD2413,OP615EL1,OnePlus_Pad2Pro,PJZ110,OP5D55L1,OP5D0DL1,CPH2649,CPH2653,CPH2655,PKX110,CPH2723,PKR110,PLQ110,PLU110,RMX5010,RMX5090,RMX5011,RMX6699,erhai,sm87xx"
 	export AERA_TARGET_DEVICES="$TARGET_DEVICE_ALT"
 	export AERA_USE_DMSETUP=1
 	export AERA_ENABLE_ROOT_MANAGER=1

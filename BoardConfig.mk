@@ -7,7 +7,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-DEVICE_PATH := device/oneplus/sm87xx
+DEVICE_PATH := device/oneplus/erhai
 
 # Building with minimal manifest
 ALLOW_MISSING_DEPENDENCIES                      := true
@@ -36,7 +36,7 @@ TARGET_NO_BOOTLOADER            := true
 # Platform
 TARGET_BOARD_PLATFORM           := sm8750
 TARGET_BOARD_PLATFORM_GPU       := qcom-adreno830
-QCOM_BOARD_PLATFORMS            += sm8750 sm87xx
+QCOM_BOARD_PLATFORMS            += sm8750 erhai
 
 # Kernel
 TARGET_KERNEL_ARCH            := arm64
@@ -122,8 +122,8 @@ AERA_USE_FSCRYPT_POLICY              := 2
 TW_INCLUDE_CRYPTO                    := true
 
 # Init
-TARGET_INIT_VENDOR_LIB          := //$(DEVICE_PATH):libinit_oplus_sm87xx
-TARGET_RECOVERY_DEVICE_MODULES  := libinit_oplus_sm87xx
+TARGET_INIT_VENDOR_LIB          := //$(DEVICE_PATH):libinit_oplus_erhai
+TARGET_RECOVERY_DEVICE_MODULES  := libinit_oplus_erhai
 
 # Recovery
 BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true
