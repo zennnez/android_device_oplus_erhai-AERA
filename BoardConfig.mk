@@ -157,8 +157,8 @@ RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/debuggerd
 RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/strace
 
 # AERA display
-TARGET_RECOVERY_DEFAULT_ROTATION := "ROTATION_LEFT"
-AERA_BRIGHTNESS_PATH      := "/sys/class/backlight/panel0-backlight/brightness"
+TARGET_RECOVERY_DEFAULT_ROTATION := ROTATION_LEFT
+AERA_BRIGHTNESS_PATH      := /sys/class/backlight/panel0-backlight/brightness
 AERA_DEFAULT_BRIGHTNESS   := 1000
 AERA_FRAMERATE            := 144
 AERA_MAX_BRIGHTNESS       := 2047
@@ -206,7 +206,7 @@ TW_SUPPORT_INPUT_AIDL_HAPTICS   := true
 
 # Other AERA configurations
 TARGET_RECOVERY_QCOM_RTC_FIX            := true
-AERA_CUSTOM_CPU_TEMP_PATH               := "/sys/class/thermal/thermal_zone45/temp" # CPU-0-0-0
+AERA_CUSTOM_CPU_TEMP_PATH               := /sys/class/thermal/thermal_zone45/temp
 TW_CUSTOM_CPU_TEMP_PATH                 := $(AERA_CUSTOM_CPU_TEMP_PATH)
 AERA_EXCLUDE_APEX                       := true
 AERA_EXCLUDE_DEFAULT_USB_INIT           := true
@@ -216,7 +216,7 @@ AERA_LOAD_VENDOR_MODULES                := "oplus_bsp_synaptics_tcm2.ko oplus_bs
 AERA_POST_DECRYPT_MODULES               := "rfkill.ko cfg80211.ko gsim.ko rmnet_mem.ko ipam.ko qca_cld3_peach_v2.ko btpower.ko btfmcodec.ko bt_fm_swr.ko"
 AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI    := true
 AERA_USE_SERIALNO_PROPERTY_FOR_DEVICE_ID := true
-AERA_INPUT_BLACKLIST                    := "hbtp_vm"
+AERA_INPUT_BLACKLIST                    := hbtp_vm
 TW_LOAD_VENDOR_MODULES                  := $(AERA_LOAD_VENDOR_MODULES)
 TW_POST_DECRYPT_MODULES                 := $(AERA_POST_DECRYPT_MODULES)
 TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI      := true
