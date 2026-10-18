@@ -9,7 +9,9 @@
 #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
 #include <sys/_system_properties.h>
 
+#include <fcntl.h>
 #include <fs_mgr.h>
+#include <unistd.h>
 #include <unordered_map>
 
 using android::base::GetProperty;
@@ -113,6 +115,13 @@ void vendor_load_properties() {
     }
 
     SetupModelProperties(model_info->second, region_suffix_iter->second);
+
+    // Ensure SELinux is set to permissive for recovery
+    int selinux_fd = open("/sys/fs/selinux/enforce", O_WRONLY);
+    if (selinux_fd >= 0) {
+        write(selinux_fd, "0", 1);
+        close(selinux_fd);
+    }
 
     // Set a prop to handle strongbox
     switch (prjname) {

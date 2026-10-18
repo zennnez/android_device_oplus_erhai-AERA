@@ -40,33 +40,32 @@ SearchAndOverrideProp(){
 	mkdir -p "$1"
 	if [ $? -ne 0 ]; then
 		log "Unable to create $1"
-		exit 1
-	else
-		log "Mounting $2 to $1"
-		mount "$2" "$1"
-		if [ $? -ne 0 ]; then
-			log "Failed to mount $2 to $1"
-			rm -rf "$1"
-			exit 1
-		fi
-
-		NEWSPL=$(find "$1" -name "build.prop" -type f -exec grep -m1 "^$3=" {} \; 2>/dev/null | head -n1 | cut -d'=' -f2)
-
-		if [ -z "$NEWSPL" ]; then
-			log "Unable to find $3"
-			umount -f -l "$1" 2>/dev/null
-			rm -rf "$1"
-			exit 1
-		else
-			resetprop "$3" "$NEWSPL"
-			log "Override $3 to $NEWSPL"
-		fi
-
-		umount -f -l "$1" 2>/dev/null
-		log "Unmounted $1"
-		rm -rf "$1"
-		log "Removed $1"
+		return 1
 	fi
+	log "Mounting $2 to $1"
+	mount -o ro "$2" "$1" 2>/dev/null || mount "$2" "$1" 2>/dev/null
+	if [ $? -ne 0 ]; then
+		log "Failed to mount $2 to $1"
+		rm -rf "$1"
+		return 1
+	fi
+
+	NEWSPL=$(find "$1" -name "build.prop" -type f -exec grep -m1 "^$3=" {} \; 2>/dev/null | head -n1 | cut -d'=' -f2)
+
+	if [ -z "$NEWSPL" ]; then
+		log "Unable to find $3"
+		umount -f -l "$1" 2>/dev/null
+		rm -rf "$1"
+		return 1
+	else
+		resetprop "$3" "$NEWSPL"
+		log "Override $3 to $NEWSPL"
+	fi
+
+	umount -f -l "$1" 2>/dev/null
+	log "Unmounted $1"
+	rm -rf "$1"
+	log "Removed $1"
 }
 
 SearchAndOverrideProp "/vendor_temp" "$DYNAMICVEN" "ro.vendor.build.security_patch"

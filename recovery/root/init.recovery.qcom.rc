@@ -28,10 +28,10 @@
 import /init.recovery.wifi.rc
 
 on early-init
+    write /sys/fs/selinux/enforce 0
     # Enable Qualcomm's Mapper5/SnapAlloc path before the allocator starts.
     # This produces native buffers importable by both Adreno EGL and KMS.
     setprop vendor.gralloc.enable_snapalloc true
-    start vendor.gatekeeper_default
 
 # Qualcomm EGL imports gralloc-native buffers. This root recovery rc is parsed
 # before recovery starts, unlike late vendor init fragments in this ramdisk.
@@ -107,12 +107,13 @@ on early-fs
     write /proc/sys/walt/sched_lib_mask_force 255
 
 on init
+    write /sys/fs/selinux/enforce 0
     setprop sys.usb.configfs 1
     setprop prepdecrypt.setpatch true
     start vendor.boot-qti
 
 on fs
-    wait /dev/block/platform/soc/${ro.boot.bootdevice}
+    wait /dev/block/platform/soc/${ro.boot.bootdevice} 2
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
     write /proc/sys/kernel/firmware_config/force_sysfs_fallback 1
 
@@ -120,10 +121,10 @@ on property:twrp.modules.loaded=true
     # Mount firmware
     mkdir /firmware
     mount vfat /dev/block/bootdevice/by-name/modem${ro.boot.slot_suffix} /firmware ro
-    # Load ADSP firmware for PMIC
-    wait /sys/kernel/boot_adsp/ssr
+    # Load ADSP firmware for PMIC if interface is supported by kernel
+    wait /sys/kernel/boot_adsp/ssr 1
     write /sys/kernel/boot_adsp/ssr 1
-    wait /sys/class/power_supply/battery
+    wait /sys/class/power_supply/battery 1
     start vendor.health-default
     start override-spl
     umount /vendor

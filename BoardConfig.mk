@@ -47,6 +47,7 @@ BOARD_KERNEL_PAGESIZE         := 4096
 TARGET_PREBUILT_KERNEL        := kernel/prebuilts/6.6/arm64/kernel-6.6
 BOARD_MKBOOTIMG_ARGS          += --header_version $(BOARD_BOOT_HEADER_VERSION)
 BOARD_MKBOOTIMG_ARGS          += --pagesize $(BOARD_KERNEL_PAGESIZE)
+BOARD_KERNEL_CMDLINE          := androidboot.selinux=permissive
 
 BOARD_RAMDISK_USE_LZ4         := true
 
