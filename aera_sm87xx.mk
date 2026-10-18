@@ -6,7 +6,7 @@
 #	See <http://www.gnu.org/licenses/>.
 #
 
-AERA_MAINTAINER := Jonas Salo & Daniel Springer
+AERA_MAINTAINER := zennnez
 AERA_SCREEN_H := 1526
 AERA_STATUS_H := 120
 AERA_HIDE_NOTCH := 1
