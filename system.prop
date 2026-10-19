@@ -4,9 +4,9 @@ ro.charger.enable_suspend=true
 # FUSE passthrough
 persist.sys.fuse.passthrough.enable=true
 
-# Display Rotation (Tablet portrait)
-ro.minui.default_rotation=ROTATION_LEFT
-persist.twrp.rotation=270
+# Touchscreen orientation (Tablet native landscape)
+persist.recovery.touch.swap_xy=1
+persist.recovery.touch.flip_y=1
 
 # USB / ADB
 ro.recovery.usb.vid=18D1

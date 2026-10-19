@@ -129,7 +129,6 @@ BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true
 TARGET_RECOVERY_PIXEL_FORMAT             := RGBX_8888
 AERA_INCLUDE_FASTBOOTD                   := true
 AERA_SKIP_ADDITIONAL_FSTAB               := true
-AERA_UI_ADAPTIVE_RESOLUTION              := true
 TW_INCLUDE_FASTBOOTD                     := true
 
 # Tool
@@ -156,18 +155,16 @@ RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/debuggerd
 RECOVERY_BINARY_SOURCE_FILES    += $(TARGET_OUT_EXECUTABLES)/strace
 
 # AERA display
-TARGET_RECOVERY_DEFAULT_ROTATION := ROTATION_LEFT
 AERA_BRIGHTNESS_PATH      := /sys/class/backlight/panel0-backlight/brightness
 AERA_DEFAULT_BRIGHTNESS   := 1000
 AERA_FRAMERATE            := 144
 AERA_MAX_BRIGHTNESS       := 2047
 AERA_NO_SCREEN_BLANK      := true
 AERA_SCREEN_BLANK_ON_BOOT := true
-AERA_THEME                := portrait_hdpi
+AERA_THEME                := landscape_hdpi
 TARGET_USES_VULKAN        := true
 
 # Legacy TWRP display aliases
-TW_ROTATION             := 270
 TW_BRIGHTNESS_PATH      := $(AERA_BRIGHTNESS_PATH)
 TW_DEFAULT_BRIGHTNESS   := $(AERA_DEFAULT_BRIGHTNESS)
 TW_FRAMERATE            := $(AERA_FRAMERATE)
@@ -175,6 +172,12 @@ TW_MAX_BRIGHTNESS       := $(AERA_MAX_BRIGHTNESS)
 TW_SCREEN_BLANK_ON_BOOT := true
 TW_NO_SCREEN_BLANK      := true
 TW_THEME                := $(AERA_THEME)
+
+# Touchscreen orientation (Tablet native landscape)
+RECOVERY_TOUCHSCREEN_SWAP_XY := true
+RECOVERY_TOUCHSCREEN_FLIP_Y  := true
+TW_RECOVERY_TOUCHSCREEN_SWAP_XY := true
+TW_RECOVERY_TOUCHSCREEN_FLIP_Y  := true
 
 # AERA file system
 RECOVERY_SDCARD_ON_DATA     := true
