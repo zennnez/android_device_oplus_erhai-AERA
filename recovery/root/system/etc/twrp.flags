@@ -38,3 +38,8 @@
 /storage        auto    /data/media/0                                                       flags=display="Internal Storage";backup=1;usermrf;fsflags="bind,utf8";removable
 /usb_otg        vfat    /dev/block/sdg1                            /dev/block/sdg           flags=display="USB-Storage";fsflags=utf8;storage;wipeingui;removable
 /usbstorage     vfat    /dev/block/sdg1                            /dev/block/sdg           flags=fsflags=utf8;display="USB Storage";storage;wipeingui;removable
+
+# Ubuntu / Linux partitions
+/esp            vfat    /dev/block/bootdevice/by-name/esp                                   flags=display="ESP (EFI)";backup=1;flashimg=1;wipeingui
+/linux          ext4    /dev/block/bootdevice/by-name/linux                                 flags=display="Ubuntu / Linux";backup=1;flashimg=1;wipeingui
+/ubuntu_data    ext4    /dev/block/bootdevice/by-name/data                                  flags=display="Ubuntu Data";backup=1;flashimg=1;wipeingui
