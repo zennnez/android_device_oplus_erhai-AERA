@@ -1,0 +1,600 @@
+#!/bin/sh
+# =============================================================================
+# setup_partitions — Android / Ubuntu disk partitioning utility for erhai
+# Can be run interactively in recovery terminal or headless with CLI flags.
+# =============================================================================
+
+DRY_RUN=1
+MODE=""
+USERDATA_GB=64
+LINUX_GB=40
+DATA_GB="all"
+ESP_SIZE_MB=300
+FORMAT_USERDATA=1
+
+DISK=""
+BYNAME=""
+SECSZ=4096
+UD_NUM=15
+ESP_NUM=16
+LIN_NUM=17
+DAT_NUM=18
+UD_START=""
+UD_END=""
+SUPER_END=""
+LAST_USABLE=""
+
+say()  { echo "$@"; }
+die()  { echo ""; echo "!! ERROR: $1" >&2; echo "!! ABORTED." >&2; exit 1; }
+
+# Math helpers with awk (safe against 32-bit shell integer overflow)
+sectors_for_gb() { awk -v g="$1" -v s="$SECSZ" 'BEGIN { printf "%d", g * 1073741824 / s }'; }
+sectors_for_mb() { awk -v m="$1" -v s="$SECSZ" 'BEGIN { printf "%d", (m * 1048576 + s - 1) / s }'; }
+gb_of_sectors()  { awk -v n="$1" -v s="$SECSZ" 'BEGIN { printf "%d", n * s / 1073741824 }'; }
+
+clean_size() { printf '%s' "$1" | tr -d ' \t' | tr ',' '.'; }
+is_num()     { awk -v v="$1" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v + 0 > 0) }'; }
+
+confirm() {
+	printf "%s [y/n, default N]: " "$1"
+	read -r _ans
+	[ "$_ans" = "y" ] || [ "$_ans" = "Y" ]
+}
+
+refresh_disk() {
+	[ "$DRY_RUN" = 1 ] && return 0
+	sync
+	stop vendor.qseecomd >/dev/null 2>&1 || true
+	blockdev --rereadpt "$DISK" >/dev/null 2>&1 || true
+	partprobe "$DISK" >/dev/null 2>&1 || true
+	start vendor.qseecomd >/dev/null 2>&1 || true
+	sleep 1
+}
+
+run_cmd() {
+	if [ "$DRY_RUN" = 1 ]; then
+		echo "   [DRY-RUN] $*"
+	else
+		echo "   + $*"
+		"$@" || die "Command failed: $*"
+	fi
+}
+
+find_disk() {
+	for d in /dev/block/by-name /dev/block/bootdevice/by-name \
+	         /dev/block/platform/soc/*/by-name /dev/block/platform/*/by-name; do
+		if [ -d "$d" ]; then
+			BYNAME="$d"
+			break
+		fi
+	done
+	[ -n "$BYNAME" ] || die "No by-name partition directory found."
+
+	REF_PART=""
+	for p in userdata super esp linux data metadata; do
+		if [ -e "$BYNAME/$p" ]; then
+			REF_PART="$BYNAME/$p"
+			break
+		fi
+	done
+	[ -n "$REF_PART" ] || die "No recognized partitions found in $BYNAME."
+	REF_DEV=$(readlink -f "$REF_PART")
+
+	BASE=$(echo "$REF_DEV" | sed -e 's/[0-9][0-9]*$//')
+	case "$BASE" in
+		*p) DISK=${BASE%p} ;;
+		*)  DISK=$BASE ;;
+	esac
+	[ -b "$DISK" ] || die "Cannot determine block disk device from $REF_PART (got $DISK)."
+
+	SECSZ=$(blockdev --getss "$DISK" 2>/dev/null)
+	[ -n "$SECSZ" ] || SECSZ=4096
+
+	load_table
+}
+
+TABLE=""
+load_table() {
+	TABLE=$(sgdisk --print "$DISK" 2>/dev/null)
+}
+
+table_rows() {
+	printf '%s\n' "$TABLE" | awk '
+		$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print $1, $2, $3 }'
+}
+
+part_num_by_name() {
+	printf '%s\n' "$TABLE" | awk -v n="$1" '
+		$1 ~ /^[0-9]+$/ && tolower($NF) == tolower(n) { print $1; exit }'
+}
+
+part_first_sector() {
+	table_rows | awk -v p="$1" '$1+0 == p+0 { print $2; exit }'
+}
+
+part_last_sector() {
+	table_rows | awk -v p="$1" '$1+0 == p+0 { print $3; exit }'
+}
+
+get_last_usable() {
+	printf '%s\n' "$TABLE" | awk '/last usable sector/ { print $NF; exit }'
+}
+
+get_disk_boundaries() {
+	SUPER_N=$(part_num_by_name super)
+	if [ -n "$SUPER_N" ]; then
+		SUPER_END=$(part_last_sector "$SUPER_N")
+		UD_START=$(( SUPER_END + 1 ))
+		_R=$(( UD_START % 8 ))
+		[ "$_R" -ne 0 ] && UD_START=$(( UD_START + 8 - _R ))
+	else
+		UD_START=3228640
+	fi
+	LAST_USABLE=$(get_last_usable)
+	[ -n "$LAST_USABLE" ] || LAST_USABLE=$(blockdev --getsz "$DISK" 2>/dev/null)
+
+	_CUR_UD=$(part_num_by_name userdata)
+	if [ -n "$_CUR_UD" ]; then
+		UD_NUM="$_CUR_UD"
+	else
+		UD_NUM=15
+	fi
+	ESP_NUM=$(( UD_NUM + 1 ))
+	LIN_NUM=$(( UD_NUM + 2 ))
+	DAT_NUM=$(( UD_NUM + 3 ))
+}
+
+unmount_storage() {
+	say ">> Unmounting partitions on $DISK..."
+	for m in /data /sdcard /esp /linux /mnt/data; do
+		umount -l "$m" >/dev/null 2>&1 || true
+	done
+	for p in userdata esp linux data; do
+		if [ -e "$BYNAME/$p" ]; then
+			DEV=$(readlink -f "$BYNAME/$p")
+			umount -l "$DEV" >/dev/null 2>&1 || true
+		fi
+	done
+}
+
+format_device() {
+	_type="$1"
+	_dev="$2"
+	_label="$3"
+
+	# Wait for device node
+	_i=0
+	while [ ! -b "$_dev" ] && [ "$_i" -lt 15 ]; do
+		refresh_disk
+		sleep 0.5
+		_i=$(( _i + 1 ))
+	done
+
+	if [ ! -b "$_dev" ]; then
+		say "!! Device node $_dev not found for formatting."
+		return 1
+	fi
+
+	case "$_type" in
+		vfat)
+			say ">> Formatting $_dev as FAT32 (label: $_label)..."
+			if command -v mkfs.fat >/dev/null 2>&1; then
+				mkfs.fat -F 32 -I -s 1 -n "$_label" "$_dev" >/dev/null 2>&1 || \
+					mkfs.fat -F 32 -I -n "$_label" "$_dev" >/dev/null 2>&1
+			else
+				say "!! mkfs.fat not available."
+				return 1
+			fi
+			;;
+		ext4)
+			say ">> Formatting $_dev as ext4 (label: $_label)..."
+			if command -v mke2fs >/dev/null 2>&1; then
+				mke2fs -t ext4 -b 4096 -F -L "$_label" "$_dev" >/dev/null 2>&1
+			elif command -v mkfs.ext4 >/dev/null 2>&1; then
+				mkfs.ext4 -F -L "$_label" "$_dev" >/dev/null 2>&1
+			else
+				say "!! mke2fs/mkfs.ext4 not available."
+				return 1
+			fi
+			;;
+		f2fs)
+			say ">> Formatting $_dev as F2FS (label: $_label)..."
+			if command -v make_f2fs >/dev/null 2>&1; then
+				make_f2fs -g android "$_dev" >/dev/null 2>&1 || make_f2fs "$_dev" >/dev/null 2>&1
+			elif command -v mke2fs >/dev/null 2>&1; then
+				say "make_f2fs not found; falling back to ext4"
+				mke2fs -t ext4 -b 4096 -F -L "$_label" "$_dev" >/dev/null 2>&1
+			fi
+			;;
+	esac
+	return 0
+}
+
+delete_partition_if_exists() {
+	_p="$1"
+	_n=$(part_num_by_name "$_p")
+	if [ -n "$_n" ]; then
+		say ">> Deleting existing partition '$_p' (number $_n)"
+		run_cmd sgdisk --delete="$_n" "$DISK"
+	fi
+}
+
+show_layout() {
+	load_table
+	say "========================================================================="
+	say "Current disk layout ($DISK):"
+	say "-------------------------------------------------------------------------"
+	min_slot="${UD_NUM:-14}"
+	sgdisk --print "$DISK" 2>/dev/null | awk -v min="$min_slot" '
+		$1 == "Number" && $2 == "Start" { header = 1; print; next }
+		header && $1 ~ /^[0-9]+$/ && $1+0 < min+0 { next }
+		header { print }
+	'
+	say "========================================================================="
+}
+
+# -----------------------------------------------------------------------------
+# Core Partitioning Actions
+# -----------------------------------------------------------------------------
+
+apply_dualboot() {
+	say "=== Executing Dual-Boot Partitioning (Android + Ubuntu) ==="
+	say "Configuration:"
+	say "  Android Userdata : ${USERDATA_GB} GB"
+	say "  ESP              : ${ESP_SIZE_MB} MB"
+	say "  Ubuntu Linux     : ${LINUX_GB} GB"
+	say "  Ubuntu Data      : ${DATA_GB}"
+
+	unmount_storage
+	get_disk_boundaries
+
+	# 1. Clean existing target partitions
+	for p in data linux1 linux esp userdata; do
+		delete_partition_if_exists "$p"
+	done
+	refresh_disk
+
+	# 2. Re-create shrunk userdata
+	_USECT=$(sectors_for_gb "$USERDATA_GB")
+	NEW_UD_END=$(( UD_START + _USECT - 1 ))
+	NEW_UD_END=$(( NEW_UD_END - NEW_UD_END % 8 ))
+
+	[ "$NEW_UD_END" -lt "$LAST_USABLE" ] || die "Userdata size exceeds disk capacity."
+
+	say ">> Creating 'userdata' (part $UD_NUM): $UD_START..$NEW_UD_END (${USERDATA_GB} GB)"
+	run_cmd sgdisk --new="$UD_NUM:$UD_START:$NEW_UD_END" \
+	                --change-name="$UD_NUM:userdata" \
+	                --typecode="$UD_NUM:8300" "$DISK"
+
+	# 3. Create ESP
+	ESP_START=$(( NEW_UD_END + 1 ))
+	_R=$(( ESP_START % 8 )); [ "$_R" -ne 0 ] && ESP_START=$(( ESP_START + 8 - _R ))
+	ESP_SECT=$(sectors_for_mb "$ESP_SIZE_MB")
+	ESP_END=$(( ESP_START + ESP_SECT - 1 ))
+	[ "$ESP_END" -lt "$LAST_USABLE" ] || die "ESP does not fit in remaining space."
+
+	say ">> Creating 'esp' (part $ESP_NUM): $ESP_START..$ESP_END (${ESP_SIZE_MB} MB)"
+	run_cmd sgdisk --new="$ESP_NUM:$ESP_START:$ESP_END" \
+	                --change-name="$ESP_NUM:esp" \
+	                --typecode="$ESP_NUM:ef00" "$DISK"
+
+	# 4. Create Linux root
+	LIN_START=$(( ESP_END + 1 ))
+	_R=$(( LIN_START % 8 )); [ "$_R" -ne 0 ] && LIN_START=$(( LIN_START + 8 - _R ))
+
+	if [ "$LINUX_GB" = "all" ]; then
+		LIN_END=$LAST_USABLE
+		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (remaining disk)"
+	else
+		_LSECT=$(sectors_for_gb "$LINUX_GB")
+		LIN_END=$(( LIN_START + _LSECT - 1 ))
+		[ "$LIN_END" -le "$LAST_USABLE" ] || die "Linux partition exceeds remaining space."
+		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (${LINUX_GB} GB)"
+	fi
+	run_cmd sgdisk --new="$LIN_NUM:$LIN_START:$LIN_END" \
+	                --change-name="$LIN_NUM:linux" \
+	                --typecode="$LIN_NUM:8300" "$DISK"
+
+	# 5. Create Data (Ubuntu extra / storage)
+	if [ "$LIN_END" -lt "$LAST_USABLE" ] && [ "$DATA_GB" != "none" ]; then
+		DAT_START=$(( LIN_END + 1 ))
+		_R=$(( DAT_START % 8 )); [ "$_R" -ne 0 ] && DAT_START=$(( DAT_START + 8 - _R ))
+
+		if [ "$DATA_GB" = "all" ]; then
+			DAT_END=$LAST_USABLE
+			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (remaining disk)"
+		else
+			_DSECT=$(sectors_for_gb "$DATA_GB")
+			DAT_END=$(( DAT_START + _DSECT - 1 ))
+			[ "$DAT_END" -gt "$LAST_USABLE" ] && DAT_END=$LAST_USABLE
+			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (${DATA_GB} GB)"
+		fi
+		run_cmd sgdisk --new="$DAT_NUM:$DAT_START:$DAT_END" \
+		                --change-name="$DAT_NUM:data" \
+		                --typecode="$DAT_NUM:8300" "$DISK"
+		HAS_DATA=1
+	else
+		HAS_DATA=0
+	fi
+
+	# 6. Commit GPT
+	say ">> Relocating backup GPT to end of disk..."
+	run_cmd sgdisk --move-second-header "$DISK"
+	refresh_disk
+
+	if [ "$DRY_RUN" = 1 ]; then
+		say "Dry run complete. No modifications were written to disk."
+		return 0
+	fi
+
+	# 7. Format partitions
+	format_device vfat "$BYNAME/esp" "ERHAI_ESP"
+	if [ "$HAS_DATA" = 1 ]; then
+		format_device ext4 "$BYNAME/data" "data"
+	fi
+	if [ "$FORMAT_USERDATA" = 1 ]; then
+		format_device f2fs "$BYNAME/userdata" "userdata"
+	fi
+
+	say "========================================================================="
+	say "Dual-Boot partitioning completed successfully!"
+	say "  - Android userdata: ready (factory reset/formatted)"
+	say "  - Ubuntu ESP: formatted as FAT32 (ERHAI_ESP)"
+	say "  - Ubuntu Linux: ready for Ubuntu rootfs installation"
+	[ "$HAS_DATA" = 1 ] && say "  - Ubuntu Data: formatted as ext4"
+	say "========================================================================="
+}
+
+apply_ubuntu_only() {
+	say "=== Executing Ubuntu-Only Partitioning ==="
+	say "Configuration:"
+	say "  ESP          : ${ESP_SIZE_MB} MB"
+	say "  Ubuntu Linux : ${LINUX_GB} GB"
+	say "  Ubuntu Data  : ${DATA_GB}"
+
+	unmount_storage
+	get_disk_boundaries
+
+	# 1. Delete Android and old Linux partitions
+	for p in data linux1 linux esp userdata; do
+		delete_partition_if_exists "$p"
+	done
+	refresh_disk
+
+	# 2. Create ESP at start of free space
+	ESP_START=$UD_START
+	ESP_SECT=$(sectors_for_mb "$ESP_SIZE_MB")
+	ESP_END=$(( ESP_START + ESP_SECT - 1 ))
+
+	say ">> Creating 'esp' (part $UD_NUM): $ESP_START..$ESP_END (${ESP_SIZE_MB} MB)"
+	run_cmd sgdisk --new="$UD_NUM:$ESP_START:$ESP_END" \
+	                --change-name="$UD_NUM:esp" \
+	                --typecode="$UD_NUM:ef00" "$DISK"
+
+	# 3. Create Linux root
+	LIN_START=$(( ESP_END + 1 ))
+	_R=$(( LIN_START % 8 )); [ "$_R" -ne 0 ] && LIN_START=$(( LIN_START + 8 - _R ))
+
+	if [ "$LINUX_GB" = "all" ]; then
+		LIN_END=$LAST_USABLE
+		say ">> Creating 'linux' (part $ESP_NUM): $LIN_START..$LIN_END (remaining disk)"
+	else
+		_LSECT=$(sectors_for_gb "$LINUX_GB")
+		LIN_END=$(( LIN_START + _LSECT - 1 ))
+		[ "$LIN_END" -le "$LAST_USABLE" ] || die "Linux partition exceeds disk capacity."
+		say ">> Creating 'linux' (part $ESP_NUM): $LIN_START..$LIN_END (${LINUX_GB} GB)"
+	fi
+	run_cmd sgdisk --new="$ESP_NUM:$LIN_START:$LIN_END" \
+	                --change-name="$ESP_NUM:linux" \
+	                --typecode="$ESP_NUM:8300" "$DISK"
+
+	# 4. Create Data if remaining space
+	if [ "$LIN_END" -lt "$LAST_USABLE" ] && [ "$DATA_GB" != "none" ]; then
+		DAT_START=$(( LIN_END + 1 ))
+		_R=$(( DAT_START % 8 )); [ "$_R" -ne 0 ] && DAT_START=$(( DAT_START + 8 - _R ))
+
+		if [ "$DATA_GB" = "all" ]; then
+			DAT_END=$LAST_USABLE
+			say ">> Creating 'data' (part $LIN_NUM): $DAT_START..$DAT_END (remaining disk)"
+		else
+			_DSECT=$(sectors_for_gb "$DATA_GB")
+			DAT_END=$(( DAT_START + _DSECT - 1 ))
+			[ "$DAT_END" -gt "$LAST_USABLE" ] && DAT_END=$LAST_USABLE
+			say ">> Creating 'data' (part $LIN_NUM): $DAT_START..$DAT_END (${DATA_GB} GB)"
+		fi
+		run_cmd sgdisk --new="$LIN_NUM:$DAT_START:$DAT_END" \
+		                --change-name="$LIN_NUM:data" \
+		                --typecode="$LIN_NUM:8300" "$DISK"
+		HAS_DATA=1
+	else
+		HAS_DATA=0
+	fi
+
+	# 5. Commit GPT
+	say ">> Relocating backup GPT..."
+	run_cmd sgdisk --move-second-header "$DISK"
+	refresh_disk
+
+	if [ "$DRY_RUN" = 1 ]; then
+		say "Dry run complete. No modifications were written to disk."
+		return 0
+	fi
+
+	# 6. Format partitions
+	format_device vfat "$BYNAME/esp" "ERHAI_ESP"
+	if [ "$HAS_DATA" = 1 ]; then
+		format_device ext4 "$BYNAME/data" "data"
+	fi
+
+	say "========================================================================="
+	say "Ubuntu-Only partitioning completed successfully!"
+	say "Android userdata has been removed."
+	say "========================================================================="
+}
+
+apply_android_only() {
+	say "=== Executing Android-Only Restore ==="
+	say "Restoring single continuous userdata partition..."
+
+	unmount_storage
+	get_disk_boundaries
+
+	# 1. Delete all Linux partitions and existing userdata
+	for p in data linux1 linux esp userdata; do
+		delete_partition_if_exists "$p"
+	done
+	refresh_disk
+
+	# 2. Create single full userdata from after super to end of disk
+	say ">> Creating full 'userdata' (part $UD_NUM): $UD_START..$LAST_USABLE"
+	run_cmd sgdisk --new="$UD_NUM:$UD_START:$LAST_USABLE" \
+	                --change-name="$UD_NUM:userdata" \
+	                --typecode="$UD_NUM:8300" "$DISK"
+
+	# 3. Commit GPT
+	say ">> Relocating backup GPT..."
+	run_cmd sgdisk --move-second-header "$DISK"
+	refresh_disk
+
+	if [ "$DRY_RUN" = 1 ]; then
+		say "Dry run complete. No modifications were written to disk."
+		return 0
+	fi
+
+	# 4. Format userdata as F2FS
+	format_device f2fs "$BYNAME/userdata" "userdata"
+
+	say "========================================================================="
+	say "Android-Only restore completed successfully!"
+	say "All Linux partitions deleted; userdata restored to full disk."
+	say "========================================================================="
+}
+
+# -----------------------------------------------------------------------------
+# Interactive Menu
+# -----------------------------------------------------------------------------
+
+interactive_menu() {
+	say "======================================================================="
+	say "         OnePlus Pad 3 (erhai) — Storage Partitioning Tool"
+	say "======================================================================="
+	say " Disk: $DISK (sector size ${SECSZ} bytes)"
+	say ""
+	show_layout
+	say ""
+	say "Please select operation mode:"
+	say "  1) Dual-Boot     (Shrink userdata, create ESP + Ubuntu + Data)"
+	say "  2) Ubuntu-Only   (Remove Android userdata, dedicate disk to Linux)"
+	say "  3) Android-Only  (Delete Linux partitions, restore full userdata)"
+	say "  4) Quit"
+	printf "Choice [1-4]: "
+	read -r choice
+
+	case "$choice" in
+		1)
+			MODE="dualboot"
+			printf "Android userdata size in GB [default %s]: " "$USERDATA_GB"
+			read -r in_ud
+			[ -n "$in_ud" ] && USERDATA_GB=$(clean_size "$in_ud")
+			printf "Ubuntu Linux root size in GB (or 'all') [default %s]: " "$LINUX_GB"
+			read -r in_lin
+			[ -n "$in_lin" ] && LINUX_GB=$(clean_size "$in_lin")
+			printf "Ubuntu data partition [all/none/GB, default %s]: " "$DATA_GB"
+			read -r in_dat
+			[ -n "$in_dat" ] && DATA_GB=$(clean_size "$in_dat")
+			;;
+		2)
+			MODE="ubuntu"
+			printf "Ubuntu Linux root size in GB (or 'all') [default %s]: " "$LINUX_GB"
+			read -r in_lin
+			[ -n "$in_lin" ] && LINUX_GB=$(clean_size "$in_lin")
+			printf "Ubuntu data partition [all/none/GB, default %s]: " "$DATA_GB"
+			read -r in_dat
+			[ -n "$in_dat" ] && DATA_GB=$(clean_size "$in_dat")
+			;;
+		3)
+			MODE="android"
+			;;
+		*)
+			say "Exiting."
+			exit 0
+			;;
+	esac
+
+	say ""
+	say "Select execution target:"
+	say "  1) Dry-run (simulate changes only, safe)"
+	say "  2) Execute (write partition table & format - CAUTION!)"
+	printf "Choice [1/2, default 1]: "
+	read -r in_run
+	if [ "$in_run" = "2" ]; then
+		DRY_RUN=0
+		say ">>> REAL EXECUTION MODE ACTIVATED <<<"
+	else
+		DRY_RUN=1
+		say ">>> Running in DRY-RUN mode <<<"
+	fi
+
+	case "$MODE" in
+		dualboot) apply_dualboot ;;
+		ubuntu)   apply_ubuntu_only ;;
+		android)  apply_android_only ;;
+	esac
+}
+
+# -----------------------------------------------------------------------------
+# Main entrypoint
+# -----------------------------------------------------------------------------
+
+need_tool() {
+	command -v "$1" >/dev/null 2>&1 || die "Required tool '$1' not found."
+}
+
+need_tool sgdisk
+need_tool awk
+find_disk
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--mode)
+			MODE="$2"; shift 2 ;;
+		--userdata)
+			USERDATA_GB="$2"; shift 2 ;;
+		--linux)
+			LINUX_GB="$2"; shift 2 ;;
+		--data)
+			DATA_GB="$2"; shift 2 ;;
+		--esp)
+			ESP_SIZE_MB="$2"; shift 2 ;;
+		--execute)
+			DRY_RUN=0; shift ;;
+		--dry-run)
+			DRY_RUN=1; shift ;;
+		--status)
+			show_layout; exit 0 ;;
+		-h|--help)
+			echo "Usage: $0 [options]"
+			echo "  --mode <dualboot|ubuntu|android>"
+			echo "  --userdata <GB>       Android userdata size in GB (default: 64)"
+			echo "  --linux <GB|all>      Ubuntu root partition size in GB (default: 40)"
+			echo "  --data <GB|all|none>  Ubuntu data partition size (default: all)"
+			echo "  --esp <MB>            ESP partition size in MB (default: 300)"
+			echo "  --execute             Execute disk changes (default is dry-run)"
+			echo "  --status              Show current GPT disk layout"
+			exit 0
+			;;
+		*)
+			shift ;;
+	esac
+done
+
+if [ -z "$MODE" ]; then
+	interactive_menu
+else
+	case "$MODE" in
+		both|dualboot) apply_dualboot ;;
+		ubuntu|linux)  apply_ubuntu_only ;;
+		android)       apply_android_only ;;
+		*) die "Unknown mode: $MODE (must be dualboot, ubuntu, or android)" ;;
+	esac
+fi
