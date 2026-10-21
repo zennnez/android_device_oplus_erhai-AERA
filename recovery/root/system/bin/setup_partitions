@@ -1,6 +1,6 @@
 #!/bin/sh
 # =============================================================================
-# setup_partitions — Android / Ubuntu disk partitioning utility for erhai
+# setup_partitions — Android / Linux disk partitioning utility for erhai
 # Based on setup_erhai_partitions.sh v1.2 by TheMojoMan
 # Can be run interactively in recovery terminal or headless with CLI flags.
 # =============================================================================
@@ -251,7 +251,7 @@ run_cmd() {
 
 unmount_storage() {
 	say ">> Unmounting existing partitions on $DISK..."
-	for m in /data /sdcard /esp /linux /ubuntu_data /mnt/data; do
+	for m in /data /sdcard /esp /linux /linux_data /mnt/data; do
 		umount -l "$m" >/dev/null 2>&1 || true
 	done
 	for p in userdata esp linux data; do
@@ -356,14 +356,14 @@ auto_mount_partitions() {
 		fi
 	fi
 
-	# 2. Ubuntu Data
+	# 2. Linux Data
 	_dat_dev="$BYNAME/data"
 	[ -e "$_dat_dev" ] || _dat_dev="/dev/block/by-name/data"
 	if [ -e "$_dat_dev" ]; then
-		mkdir -p /ubuntu_data
-		umount /ubuntu_data >/dev/null 2>&1 || true
-		if mount -t ext4 "$_dat_dev" /ubuntu_data 2>/dev/null; then
-			say "   [OK] Mounted 'data' at /ubuntu_data"
+		mkdir -p /linux_data
+		umount /linux_data >/dev/null 2>&1 || true
+		if mount -t ext4 "$_dat_dev" /linux_data 2>/dev/null; then
+			say "   [OK] Mounted 'data' at /linux_data"
 		fi
 	fi
 
@@ -417,12 +417,12 @@ show_layout() {
 # -----------------------------------------------------------------------------
 
 apply_dualboot() {
-	say "=== Executing Dual-Boot Partitioning (Android + Ubuntu) ==="
+	say "=== Executing Dual-Boot Partitioning (Android + Linux) ==="
 	say "Configuration:"
 	say "  Android Userdata : ${USERDATA_GB} GB"
 	say "  ESP              : ${ESP_SIZE_MB} MB (fixed FAT32)"
-	say "  Ubuntu Linux     : ${LINUX_GB} GB"
-	say "  Ubuntu Data      : ${DATA_GB}"
+	say "  Linux Root       : ${LINUX_GB} GB"
+	say "  Linux Data       : ${DATA_GB}"
 
 	unmount_storage
 
@@ -494,7 +494,7 @@ apply_dualboot() {
 	                --change-name="$LIN_NUM:linux" \
 	                --typecode="$LIN_NUM:8300" "$DISK"
 
-	# 5. Create Data (Ubuntu extra / storage)
+	# 5. Create Data (Linux extra / storage)
 	HAS_DATA=0
 	if [ "$LIN_END" -lt "$LAST_USABLE" ] && [ "$DATA_GB" != "none" ]; then
 		DAT_START=$(( LIN_END + 1 ))
@@ -543,12 +543,12 @@ apply_dualboot() {
 	say "========================================================================="
 }
 
-apply_ubuntu_only() {
-	say "=== Executing Ubuntu-Only Partitioning ==="
+apply_linux_only() {
+	say "=== Executing Linux-Only Partitioning ==="
 	say "Configuration:"
 	say "  ESP          : ${ESP_SIZE_MB} MB"
-	say "  Ubuntu Linux : ${LINUX_GB} GB"
-	say "  Ubuntu Data  : ${DATA_GB}"
+	say "  Linux Root   : ${LINUX_GB} GB"
+	say "  Linux Data   : ${DATA_GB}"
 
 	unmount_storage
 
@@ -641,7 +641,7 @@ apply_ubuntu_only() {
 	auto_mount_partitions
 
 	say "========================================================================="
-	say "Ubuntu-Only partitioning completed and auto-mounted successfully!"
+	say "Linux-Only partitioning completed and auto-mounted successfully!"
 	say "========================================================================="
 }
 
@@ -914,10 +914,10 @@ while [ $# -gt 0 ]; do
 			DEV_MODE=1; shift ;;
 		-h|--help)
 			echo "Usage: $0 [options]"
-			echo "  --mode <dualboot|ubuntu|android>"
+			echo "  --mode <dualboot|linux|android>"
 			echo "  --userdata <GB>       Android userdata size in GB (default: 64)"
-			echo "  --linux <GB|all>      Ubuntu root partition size in GB (default: 40)"
-			echo "  --data <GB|all|none>  Ubuntu data partition size (default: all)"
+			echo "  --linux <GB|all>      Linux root partition size in GB (default: 40)"
+			echo "  --data <GB|all|none>  Linux data partition size (default: all)"
 			echo "  --esp <MB>            ESP partition size in MB (default: 300)"
 			echo "  --execute             Execute disk changes (default is dry-run)"
 			echo "  --mount               Auto-mount partitions without repartitioning"
@@ -934,8 +934,8 @@ if [ -z "$MODE" ]; then
 else
 	case "$MODE" in
 		both|dualboot) apply_dualboot ;;
-		ubuntu|linux)  apply_ubuntu_only ;;
+		linux)  apply_linux_only ;;
 		android)       apply_android_only ;;
-		*) die "Unknown mode: $MODE (must be dualboot, ubuntu, or android)" ;;
+		*) die "Unknown mode: $MODE (must be dualboot, linux, or android)" ;;
 	esac
 fi
