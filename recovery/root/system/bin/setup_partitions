@@ -251,7 +251,7 @@ run_cmd() {
 
 unmount_storage() {
 	say ">> Unmounting existing partitions on $DISK..."
-	for m in /data /sdcard /esp /linux /linux_data /mnt/data; do
+	for m in /data /sdcard /esp /linux /ubuntu_data /mnt/data; do
 		umount -l "$m" >/dev/null 2>&1 || true
 	done
 	for p in userdata esp linux data; do
@@ -360,10 +360,10 @@ auto_mount_partitions() {
 	_dat_dev="$BYNAME/data"
 	[ -e "$_dat_dev" ] || _dat_dev="/dev/block/by-name/data"
 	if [ -e "$_dat_dev" ]; then
-		mkdir -p /linux_data
-		umount /linux_data >/dev/null 2>&1 || true
-		if mount -t ext4 "$_dat_dev" /linux_data 2>/dev/null; then
-			say "   [OK] Mounted 'data' at /linux_data"
+		mkdir -p /ubuntu_data
+		umount /ubuntu_data >/dev/null 2>&1 || true
+		if mount -t ext4 "$_dat_dev" /ubuntu_data 2>/dev/null; then
+			say "   [OK] Mounted 'data' at /ubuntu_data"
 		fi
 	fi
 
@@ -934,7 +934,7 @@ if [ -z "$MODE" ]; then
 else
 	case "$MODE" in
 		both|dualboot) apply_dualboot ;;
-		linux)  apply_linux_only ;;
+		linux|ubuntu)  apply_linux_only ;;
 		android)       apply_android_only ;;
 		*) die "Unknown mode: $MODE (must be dualboot, linux, or android)" ;;
 	esac
