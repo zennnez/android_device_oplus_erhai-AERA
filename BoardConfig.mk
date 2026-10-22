@@ -161,7 +161,7 @@ AERA_FRAMERATE            := 144
 AERA_MAX_BRIGHTNESS       := 2047
 AERA_NO_SCREEN_BLANK      := true
 AERA_SCREEN_BLANK_ON_BOOT := true
-AERA_THEME                := landscape_hdpi
+AERA_THEME                := portrait_hdpi
 TARGET_USES_VULKAN        := true
 
 # Legacy TWRP display aliases
