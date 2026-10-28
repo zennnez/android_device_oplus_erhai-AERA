@@ -1,8 +1,26 @@
 #!/bin/sh
 # =============================================================================
-# setup_partitions — Android / Linux disk partitioning utility for erhai
-# Based on setup_erhai_partitions.sh v1.2 by TheMojoMan
-# Can be run interactively in recovery terminal or headless with CLI flags.
+# setup_partitions — Android / Linux (Mojo layout) disk partitioning for erhai
+#
+# Layout managed here:   userdata (Android) | esp | linux | data
+# Based on setup_erhai_partitions.sh v1.2 by TheMojoMan.
+#
+# Run from the recovery UI (Tools -> Partitioning) or in a recovery shell:
+#     setup_partitions                       interactive, dry-run by default
+#     setup_partitions --mode dualboot --userdata 64 --linux 40 --data all --execute
+#
+# What it does to userdata (IMPORTANT):
+#   /data is metadata-encrypted: its key lives in /metadata/vold/metadata_encryption
+#   and recovery maps userdata through dm-default-key. A recreated userdata can
+#   therefore NOT be formatted with a bare mkfs. This tool
+#     * drops the stale userdata dm mapping,
+#     * removes the old key directory from /metadata,
+#     * clears old filesystem signatures at the start of every new partition,
+#   and leaves the actual userdata format to recovery's "Format Data" (the
+#   recovery UI runs it automatically after this tool succeeds).
+#
+# Exit codes: 0 ok | 1 error | 2 GPT written but the kernel could not re-read it
+#             (reboot recovery, then run Wipe -> Format Data; nothing formatted).
 # =============================================================================
 
 DRY_RUN=1
@@ -12,20 +30,25 @@ USERDATA_GB=64
 LINUX_GB=40
 DATA_GB="all"
 ESP_SIZE_MB=300
-FORMAT_USERDATA=1
 
 DISK=""
 BYNAME=""
 SECSZ=4096
 UD_NUM=""
 UD_START=""
-UD_END=""
+TABLE=""
+DELETED=""
+NEW_PARTS=""
 LAST_USABLE=""
+QSEE_STOPPED=0
+KEY_DIR="/metadata/vold/metadata_encryption"
+SYSFS="${ERHAI_SYSFS:-/sys}"
+RC_REBOOT=2
 
 # Where the by-name links live differs between TWRP builds, and a link can
 # already exist while its device node does not (a dangling link makes `-e`
-# false and `-L` true). The search prefers the directory that exposes userdata,
-# and keeps the first existing one as the fallback.
+# false and `-L` true). Prefer the directory that exposes userdata and keep the
+# first existing one as the fallback.
 BYNAME_DIRS="${ERHAI_BYNAME_DIRS:-/dev/block/by-name /dev/block/bootdevice/by-name /dev/block/platform/soc/*/by-name /dev/block/platform/*/by-name}"
 
 say()  { echo "$@"; }
@@ -41,8 +64,8 @@ have_node()   { [ -e "$1" ] || [ -L "$1" ]; }
 usable_node() { [ -b "$(readlink -f "$1" 2>/dev/null)" ]; }
 
 is_whole_disk() {
-	[ -d "/sys/block/$(basename "$1")" ] || return 1
-	[ ! -e "/sys/block/$(basename "$1")/partition" ]
+	[ -d "$SYSFS/block/$(basename "$1")" ] || return 1
+	[ ! -e "$SYSFS/block/$(basename "$1")/partition" ]
 }
 
 disk_of_node() {
@@ -54,6 +77,16 @@ disk_of_node() {
 	esac
 }
 
+# /dev/block/sda + 15 -> /dev/block/sda15 ; /dev/block/mmcblk0 + 15 -> ...p15
+part_dev() {
+	case "$DISK" in
+		*[0-9]) echo "${DISK}p$1" ;;
+		*)      echo "${DISK}$1" ;;
+	esac
+}
+
+# ------------------------------------------------------------------ discover --
+
 find_disk() {
 	_fb=""
 	for d in $BYNAME_DIRS; do
@@ -62,12 +95,10 @@ find_disk() {
 		if usable_node "$d/userdata"; then BYNAME="$d"; break; fi
 	done
 	[ -n "$BYNAME" ] || BYNAME="$_fb"
-	[ -n "$BYNAME" ] || die "No by-name partition directory found. Are you in TWRP?"
+	[ -n "$BYNAME" ] || die "No by-name partition directory found. Are you in recovery?"
 
-	UD=""
 	if usable_node "$BYNAME/userdata"; then
-		UD=$(readlink -f "$BYNAME/userdata")
-		UD_NUM=$(echo "$UD" | sed -e 's/.*[^0-9]\([0-9][0-9]*\)$/\1/')
+		UD_NUM=$(readlink -f "$BYNAME/userdata" | sed -e 's/.*[^0-9]\([0-9][0-9]*\)$/\1/')
 		disk_of_node "$BYNAME/userdata"
 	elif have_node "$BYNAME/userdata"; then
 		say " !! '$BYNAME/userdata' points at a device node that is not there yet."
@@ -76,16 +107,14 @@ find_disk() {
 	fi
 
 	if [ -z "$DISK" ]; then
-		# No usable userdata — work the disk out from ANY other by-name entry,
-		# so the tool still runs on a tablet whose Android data was removed.
+		# No usable userdata: work the disk out from any other by-name entry.
 		for _p in super boot_a boot_b boot system vendor persist metadata vbmeta_a; do
 			if usable_node "$BYNAME/$_p"; then disk_of_node "$BYNAME/$_p"; break; fi
 		done
 	fi
 
 	if [ -z "$DISK" ]; then
-		# Last resort: scan the whole block devices for a GPT that carries a
-		# 'userdata' partition; if none does, remember the first real GPT.
+		# Last resort: scan whole disks for a GPT carrying a 'userdata' partition.
 		_scanned=""
 		for _d in /dev/block/sd* /dev/block/vd* /dev/block/mmcblk* /dev/block/nvme*n1; do
 			is_whole_disk "$_d" || continue
@@ -111,7 +140,9 @@ find_disk() {
 	load_table
 }
 
-TABLE=""
+# ----------------------------------------------------------- table snapshot --
+# The table is snapshotted once at start; planning works from the snapshot.
+
 load_table() {
 	TABLE=$(sgdisk --print "$DISK" 2>/dev/null)
 }
@@ -138,10 +169,12 @@ last_usable_sector() {
 	printf '%s\n' "$TABLE" | awk '/last usable sector/ { print $NF; exit }'
 }
 
-first_usable_sector() {
-	printf '%s\n' "$TABLE" | awk '/First usable sector/ { print $5+0; exit }'
+gpt_max_entries() {
+	printf '%s\n' "$TABLE" | awk '/Partition table holds up to/ { print $6; exit }'
 }
 
+# name of partition number $1 from the snapshot; empty if absent or listed in
+# the deleted list $2 (a deleted partition's number counts as free)
 part_name_by_num_excl() {
 	printf '%s\n' "$TABLE" | awk -v p="$1" -v del="$2" '
 		BEGIN { nd = split(del, D, " "); for (i = 1; i <= nd; i++) skip[D[i]] = 1 }
@@ -152,17 +185,13 @@ part_name_by_num_excl() {
 		}'
 }
 
-gpt_max_entries() {
-	printf '%s\n' "$TABLE" | awk '/Partition table holds up to/ { print $6; exit }'
-}
-
+# next free partition number after cursor $2; numbers in $1 count as free
 next_slot() {
 	_max=$(gpt_max_entries)
 	[ -n "$_max" ] || _max=128
 	_n=$(($2 + 1))
 	while :; do
-		[ "$_n" -le "$_max" ] || die \
-			"no free partition number left (GPT holds only $_max entries)."
+		[ "$_n" -le "$_max" ] || die "no free partition number left (GPT holds only $_max entries)."
 		if [ -z "$(part_name_by_num_excl "$_n" "$1")" ]; then
 			echo "$_n"
 			return
@@ -178,6 +207,7 @@ lowest_free_num() {
 		END { while (n in used) n++; print n }'
 }
 
+# first start sector (> $3) of a kept partition; $1 = me (ignored), $2 = deleted list
 next_start_after() {
 	table_rows | awk -v me="$1" -v del="$2" -v after="$3" '
 		BEGIN { nd = split(del, D, " "); for (i = 1; i <= nd; i++) skip[D[i]] = 1; best = 0 }
@@ -189,53 +219,37 @@ next_start_after() {
 		END { print best }'
 }
 
-plan_gap() {
-	table_rows | sort -k2,2n | awk -v del="$1" -v ud="$2" -v act="$3" -v udend="$4" \
-		-v first="$5" -v last="$6" '
-		BEGIN {
-			nd = split(del, D, " "); for (i = 1; i <= nd; i++) skip[D[i]] = 1
-			cur = first + 0; best = 0; bs = 0; be = 0
-		}
-		{
-			n = $1; s = $2 + 0; e = $3 + 0
-			if (n == ud) {
-				if (act == "delete") next
-				if (act == "shrink") e = udend + 0
-			}
-			if (n in skip) next
-			if (s - 1 >= cur) { g = s - cur; if (g > best) { best = g; bs = cur; be = s - 1 } }
-			if (e + 1 > cur) cur = e + 1
-		}
-		END {
-			g = last - cur + 1
-			if (g > best) { best = g; bs = cur; be = last }
-			if (best > 0) print bs, be
-		}'
-}
-
-# Math helpers with awk (safe against 32-bit shell integer overflow)
+# Math via awk: mksh does 32-bit arithmetic, so anything involving bytes overflows.
 sectors_for_gb() { awk -v g="$1" -v s="$SECSZ" 'BEGIN { printf "%d", g * 1073741824 / s }'; }
 sectors_for_mb() { awk -v m="$1" -v s="$SECSZ" 'BEGIN { printf "%d", (m * 1048576 + s - 1) / s }'; }
 gb_of_sectors()  { awk -v n="$1" -v s="$SECSZ" 'BEGIN { printf "%d", n * s / 1073741824 }'; }
+mb_of_sectors()  { awk -v n="$1" -v s="$SECSZ" 'BEGIN { printf "%d", n * s / 1048576 }'; }
+# expected "<start> <size>" in 512-byte units, as the kernel reports them in sysfs
+expected_512()   { awk -v a="$1" -v b="$2" -v s="$SECSZ" 'BEGIN { printf "%d %d", a * s / 512, (b - a + 1) * s / 512 }'; }
 
 clean_size() { printf '%s' "$1" | tr -d ' \t' | tr ',' '.'; }
 is_size()    { awk -v v="$1" 'BEGIN { exit !(v ~ /^[0-9]+(\.[0-9]+)?$/ && v + 0 > 0) }'; }
-num_le()     { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 <= b + 0) }'; }
+align8_up()  { echo $(( ($1 + 7) / 8 * 8 )); }
+
+# smallest sector count that still gives a legal FAT32 (>= 65525 clusters at
+# 1 sector/cluster) — the boot firmware rejects anything smaller
+esp_min_sectors() {
+	awk -v s="$SECSZ" 'BEGIN { f = (65525 + 2) * 4; f = int((f + s - 1) / s); printf "%d", 65525 + 32 + 2 * f }'
+}
+
+# ------------------------------------------------------------------ helpers --
 
 refresh_disk() {
 	[ "$DRY_RUN" = 1 ] && return 0
 	sync
-	stop vendor.qseecomd >/dev/null 2>&1 || true
 	blockdev --rereadpt "$DISK" >/dev/null 2>&1 || true
 	partprobe "$DISK" >/dev/null 2>&1 || true
-	# trigger uevent generation in sysfs
-	_bname=$(basename "$DISK")
-	[ -e "/sys/block/$_bname/uevent" ] && echo add > "/sys/block/$_bname/uevent" 2>/dev/null || true
-	for _ue in /sys/block/$_bname/$_bname*/uevent; do
+	_bn=$(basename "$DISK")
+	[ -e "$SYSFS/block/$_bn/uevent" ] && echo add > "$SYSFS/block/$_bn/uevent" 2>/dev/null || true
+	for _ue in "$SYSFS/block/$_bn/$_bn"*/uevent; do
 		[ -e "$_ue" ] && echo add > "$_ue" 2>/dev/null || true
 	done
 	mdev -s >/dev/null 2>&1 || true
-	start vendor.qseecomd >/dev/null 2>&1 || true
 	sleep 1
 }
 
@@ -245,38 +259,91 @@ run_cmd() {
 	else
 		echo "   + $*"
 		"$@" || die "Command failed: $*"
-		refresh_disk
 	fi
+}
+
+# qseecomd may hold partitions on this disk and make the kernel refuse to
+# re-read the table. Stop it ONCE for the whole run (and only if it is running),
+# restart it ONCE at exit — not around every command.
+quiesce_begin() {
+	[ "$DRY_RUN" = 1 ] && return 0
+	[ "$QSEE_STOPPED" = 1 ] && return 0
+	[ "$(getprop init.svc.vendor.qseecomd 2>/dev/null)" = "running" ] || return 0
+	stop vendor.qseecomd >/dev/null 2>&1 && QSEE_STOPPED=1
+	trap quiesce_end EXIT
+}
+
+quiesce_end() {
+	[ "$QSEE_STOPPED" = 1 ] || return 0
+	QSEE_STOPPED=0
+	start vendor.qseecomd >/dev/null 2>&1 || true
 }
 
 unmount_storage() {
 	say ">> Unmounting existing partitions on $DISK..."
+	[ "$DRY_RUN" = 1 ] && return 0
 	for m in /data /sdcard /esp /linux /ubuntu_data /mnt/data; do
 		umount -l "$m" >/dev/null 2>&1 || true
 	done
 	for p in userdata esp linux data; do
 		if [ -e "$BYNAME/$p" ]; then
-			DEV=$(readlink -f "$BYNAME/$p" 2>/dev/null)
-			[ -b "$DEV" ] && umount -l "$DEV" >/dev/null 2>&1 || true
+			_dv=$(readlink -f "$BYNAME/$p" 2>/dev/null)
+			[ -b "$_dv" ] && umount -l "$_dv" >/dev/null 2>&1 || true
 		fi
 	done
 }
 
+# Recovery maps userdata through dm-default-key (/dev/block/mapper/userdata).
+# That mapping is built for the OLD partition and must not survive repartitioning.
+drop_userdata_mapper() {
+	[ "$DRY_RUN" = 1 ] && return 0
+	[ -e /dev/block/mapper/userdata ] || [ -L /dev/block/mapper/userdata ] || return 0
+	say ">> Removing the stale userdata encryption mapping..."
+	if command -v dmsetup >/dev/null 2>&1; then
+		dmsetup remove userdata >/dev/null 2>&1 || dmsetup remove -f userdata >/dev/null 2>&1 || true
+	elif command -v dmctl >/dev/null 2>&1; then
+		dmctl delete userdata >/dev/null 2>&1 || true
+	else
+		say "   (no dmsetup/dmctl — the mapping disappears when recovery reboots)"
+	fi
+}
+
+# The old metadata-encryption key does not belong to a recreated userdata.
+wipe_userdata_keys() {
+	[ "$DRY_RUN" = 1 ] && { say "   [DRY-RUN] remove $KEY_DIR"; return 0; }
+	_mounted_here=0
+	if ! grep -q ' /metadata ' /proc/mounts 2>/dev/null; then
+		mkdir -p /metadata
+		for _md in /dev/block/by-name/metadata "$BYNAME/metadata"; do
+			[ -e "$_md" ] || continue
+			if mount -t f2fs "$_md" /metadata 2>/dev/null || mount -t ext4 "$_md" /metadata 2>/dev/null; then
+				_mounted_here=1
+				break
+			fi
+		done
+	fi
+	if [ -d "$KEY_DIR" ]; then
+		say ">> Removing the old userdata encryption key ($KEY_DIR)"
+		rm -rf "$KEY_DIR" 2>/dev/null || say "   !! could not remove it — use Wipe -> Format Data"
+		sync
+	elif grep -q ' /metadata ' /proc/mounts 2>/dev/null; then
+		say ">> No old encryption key present."
+	else
+		say "   !! /metadata could not be mounted — Wipe -> Format Data will remove the old key."
+	fi
+	[ "$_mounted_here" = 1 ] && umount /metadata >/dev/null 2>&1 || true
+}
+
 refresh_byname_symlinks() {
 	[ "$DRY_RUN" = 1 ] && return 0
-	say ">> Refreshing by-name partition symlinks..."
 	load_table
 	for d in /dev/block/by-name /dev/block/bootdevice/by-name; do
 		mkdir -p "$d" 2>/dev/null || true
 	done
-	_rows=$(table_rows)
-	for p_num in $(printf '%s\n' "$_rows" | awk '{print $1}'); do
-		p_name=$(printf '%s\n' "$TABLE" | awk -v p="$p_num" '$1+0 == p+0 {print $NF; exit}')
+	for p_num in $(table_rows | awk '{print $1}'); do
+		p_name=$(printf '%s\n' "$TABLE" | awk -v p="$p_num" '$1+0 == p+0 { print $NF; exit }')
 		[ -n "$p_name" ] || continue
-		case "$DISK" in
-			*p|*p[0-9]*) p_dev="${DISK}p${p_num}" ;;
-			*)           p_dev="${DISK}${p_num}" ;;
-		esac
+		p_dev=$(part_dev "$p_num")
 		if [ -b "$p_dev" ]; then
 			for d in /dev/block/by-name /dev/block/bootdevice/by-name "$BYNAME"; do
 				[ -n "$d" ] && [ -d "$d" ] && ln -sf "$p_dev" "$d/$p_name" 2>/dev/null || true
@@ -285,111 +352,123 @@ refresh_byname_symlinks() {
 	done
 }
 
-format_device() {
-	_type="$1"
-	_dev="$2"
-	_label="$3"
-
-	# Wait for device node to settle
-	_i=0
-	while [ ! -b "$_dev" ] && [ "$_i" -lt 15 ]; do
+wait_node() {
+	_wi=0
+	while [ ! -b "$1" ] && [ "$_wi" -lt 10 ]; do
 		refresh_disk
 		refresh_byname_symlinks
-		sleep 0.5
-		_i=$(( _i + 1 ))
+		_wi=$((_wi + 1))
 	done
+	[ -b "$1" ]
+}
 
-	if [ ! -b "$_dev" ]; then
+# Does the KERNEL see partition $1 (start $2, end $3 in disk sectors) with the
+# geometry we just wrote? If not, the old table is still in use, and any raw
+# write to that device node could land in the wrong place.
+kernel_matches() {
+	_kn=$1; _ks=$2; _ke=$3
+	_kb=$(basename "$DISK"); _ksys=""
+	for _kc in "$SYSFS/block/$_kb/${_kb}${_kn}" "$SYSFS/block/$_kb/${_kb}p${_kn}"; do
+		if [ -r "$_kc/size" ] && [ -r "$_kc/start" ]; then _ksys="$_kc"; break; fi
+	done
+	[ -n "$_ksys" ] || return 1
+	_kexp=$(expected_512 "$_ks" "$_ke")
+	_kgot="$(cat "$_ksys/start") $(cat "$_ksys/size")"
+	[ "$_kexp" = "$_kgot" ]
+}
+
+# every row of NEW_PARTS ("num start end name") must match the kernel's view
+new_parts_visible() {
+	_nl='
+'
+	_oi=$IFS; IFS=$_nl; _ok=0
+	for _row in $NEW_PARTS; do
+		[ -n "$_row" ] || continue
+		IFS=$_oi
+		set -- $_row
+		if ! kernel_matches "$1" "$2" "$3"; then
+			[ "${QUIET:-0}" = 1 ] || say "   !! kernel does not see '$4' (part $1) with the new geometry yet"
+			_ok=1
+		fi
+		IFS=$_nl
+	done
+	IFS=$_oi
+	return $_ok
+}
+
+new_part_made() { printf '%s\n' "$NEW_PARTS" | grep -q " $1\$"; }
+
+# Zero the start of a partition so signatures of whatever occupied this space
+# before (old f2fs/ext4/FAT superblocks) cannot be mistaken for a filesystem.
+scrub_partition() {
+	[ "$DRY_RUN" = 1 ] && return 0
+	_sdev="$BYNAME/$1"
+	if ! wait_node "$_sdev"; then
+		say "!! '$1': device node not found, old signatures not cleared"
+		return 1
+	fi
+	_sreal=$(readlink -f "$_sdev")
+	say ">> Clearing old signatures on '$1'"
+	dd if=/dev/zero of="$_sreal" bs=1048576 count=8 >/dev/null 2>&1 || {
+		say "!! could not clear '$1'"
+		return 1
+	}
+}
+
+# format_device <vfat|ext4> <device> <label> — errors are shown, not hidden
+format_device() {
+	_type="$1"; _dev="$2"; _label="$3"
+	if ! wait_node "$_dev"; then
 		say "!! Device node $_dev not found for formatting."
 		return 1
 	fi
-
+	_flog=/tmp/setup_partitions.mkfs.log
+	_rc=0
 	case "$_type" in
 		vfat)
+			command -v mkfs.fat >/dev/null 2>&1 || { say "!! mkfs.fat not available."; return 1; }
 			say ">> Formatting $_dev as FAT32 (label: $_label)..."
-			if command -v mkfs.fat >/dev/null 2>&1; then
-				mkfs.fat -F 32 -I -s 1 -n "$_label" "$_dev" >/dev/null 2>&1 || \
-					mkfs.fat -F 32 -I -n "$_label" "$_dev" >/dev/null 2>&1
-			else
-				say "!! mkfs.fat not available."
-				return 1
-			fi
+			# -s 1 is required: larger clusters would make the volume an invalid FAT32
+			mkfs.fat -F 32 -I -s 1 -n "$_label" "$_dev" >"$_flog" 2>&1 || _rc=1
 			;;
 		ext4)
 			say ">> Formatting $_dev as ext4 (label: $_label)..."
 			if command -v mke2fs >/dev/null 2>&1; then
-				mke2fs -t ext4 -b 4096 -F -L "$_label" "$_dev" >/dev/null 2>&1
+				mke2fs -t ext4 -b 4096 -F -L "$_label" "$_dev" >"$_flog" 2>&1 || _rc=1
 			elif command -v mkfs.ext4 >/dev/null 2>&1; then
-				mkfs.ext4 -F -L "$_label" "$_dev" >/dev/null 2>&1
+				mkfs.ext4 -F -L "$_label" "$_dev" >"$_flog" 2>&1 || _rc=1
 			else
 				say "!! mke2fs/mkfs.ext4 not available."
 				return 1
 			fi
 			;;
-		f2fs)
-			say ">> Formatting $_dev as F2FS (label: $_label)..."
-			if command -v make_f2fs >/dev/null 2>&1; then
-				make_f2fs -g android "$_dev" >/dev/null 2>&1 || make_f2fs "$_dev" >/dev/null 2>&1
-			elif command -v mke2fs >/dev/null 2>&1; then
-				say "make_f2fs not found; falling back to ext4"
-				mke2fs -t ext4 -b 4096 -F -L "$_label" "$_dev" >/dev/null 2>&1
-			fi
-			;;
+		*) return 1 ;;
 	esac
+	if [ "$_rc" != 0 ]; then
+		say "!! formatting $_dev failed:"
+		tail -n 5 "$_flog" 2>/dev/null
+		return 1
+	fi
 	return 0
 }
 
+# Mounts the Linux-side partitions only. /data is NOT mounted here: recovery owns
+# it (decryption, dm mapping) and must mount it itself, after Format Data.
 auto_mount_partitions() {
 	[ "$DRY_RUN" = 1 ] && return 0
-	say ">> Auto-mounting created partitions in recovery (no reboot required)..."
 	refresh_byname_symlinks
-	refresh_disk
-
-	# 1. ESP
-	_esp_dev="$BYNAME/esp"
-	[ -e "$_esp_dev" ] || _esp_dev="/dev/block/by-name/esp"
-	if [ -e "$_esp_dev" ]; then
-		mkdir -p /esp
-		umount /esp >/dev/null 2>&1 || true
-		if mount -t vfat "$_esp_dev" /esp 2>/dev/null; then
-			say "   [OK] Mounted 'esp' at /esp"
+	for _pair in "esp:/esp:vfat" "data:/ubuntu_data:ext4" "linux:/linux:ext4"; do
+		_pn=${_pair%%:*}; _rest=${_pair#*:}; _mp=${_rest%%:*}; _ft=${_rest#*:}
+		_pd="$BYNAME/$_pn"
+		[ -b "$_pd" ] || continue
+		mkdir -p "$_mp"
+		umount "$_mp" >/dev/null 2>&1 || true
+		if mount -t "$_ft" "$_pd" "$_mp" 2>/dev/null; then
+			say "   [OK] Mounted '$_pn' at $_mp"
+		else
+			say "   [--] '$_pn' not mounted (not formatted yet?)"
 		fi
-	fi
-
-	# 2. Linux Data
-	_dat_dev="$BYNAME/data"
-	[ -e "$_dat_dev" ] || _dat_dev="/dev/block/by-name/data"
-	if [ -e "$_dat_dev" ]; then
-		mkdir -p /ubuntu_data
-		umount /ubuntu_data >/dev/null 2>&1 || true
-		if mount -t ext4 "$_dat_dev" /ubuntu_data 2>/dev/null; then
-			say "   [OK] Mounted 'data' at /ubuntu_data"
-		fi
-	fi
-
-	# 3. Linux rootfs (if already formatted ext4)
-	_lin_dev="$BYNAME/linux"
-	[ -e "$_lin_dev" ] || _lin_dev="/dev/block/by-name/linux"
-	if [ -e "$_lin_dev" ]; then
-		mkdir -p /linux
-		umount /linux >/dev/null 2>&1 || true
-		if mount -t ext4 "$_lin_dev" /linux 2>/dev/null; then
-			say "   [OK] Mounted 'linux' at /linux"
-		fi
-	fi
-
-	# 4. Userdata (Android)
-	_ud_dev="$BYNAME/userdata"
-	[ -e "$_ud_dev" ] || _ud_dev="/dev/block/by-name/userdata"
-	if [ -e "$_ud_dev" ]; then
-		mkdir -p /data
-		umount /data >/dev/null 2>&1 || true
-		if mount -t f2fs "$_ud_dev" /data 2>/dev/null || mount -t ext4 "$_ud_dev" /data 2>/dev/null; then
-			say "   [OK] Mounted 'userdata' at /data"
-			mkdir -p /data/media/0 /sdcard 2>/dev/null || true
-			mount -o bind /data/media/0 /sdcard 2>/dev/null || true
-		fi
-	fi
+	done
 }
 
 show_layout() {
@@ -402,7 +481,7 @@ show_layout() {
 		super_n=$(part_num_by_name super)
 		min_slot="${super_n:-14}"
 	fi
-	sgdisk --print "$DISK" 2>/dev/null | awk -v min="$min_slot" '
+	printf '%s\n' "$TABLE" | awk -v min="$min_slot" '
 		$1 == "Number" && $2 == "Start" { header = 1; print; next }
 		header && $1 ~ /^[0-9]+$/ && $1+0 < min+0 { next }
 		header { print }
@@ -412,299 +491,294 @@ show_layout() {
 	say "========================================================================="
 }
 
-# -----------------------------------------------------------------------------
-# Automated Actions (Called via CLI or Recovery GUI)
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------- planning helpers --
 
-apply_dualboot() {
-	say "=== Executing Dual-Boot Partitioning (Android + Linux) ==="
-	say "Configuration:"
-	say "  Android Userdata : ${USERDATA_GB} GB"
-	say "  ESP              : ${ESP_SIZE_MB} MB (fixed FAT32)"
-	say "  Linux Root       : ${LINUX_GB} GB"
-	say "  Linux Data       : ${DATA_GB}"
+validate_args() {
+	case "$MODE" in
+		""|both|dualboot|linux|ubuntu|android) ;;
+		*) die "Unknown mode: $MODE (must be dualboot, linux, or android)" ;;
+	esac
+	USERDATA_GB=$(clean_size "$USERDATA_GB")
+	LINUX_GB=$(clean_size "$LINUX_GB")
+	DATA_GB=$(clean_size "$DATA_GB")
+	case "$MODE" in
+		both|dualboot) is_size "$USERDATA_GB" || die "--userdata must be a number of GB (got '$USERDATA_GB')." ;;
+	esac
+	case "$MODE" in
+		both|dualboot|linux|ubuntu)
+			[ "$LINUX_GB" = "all" ] || is_size "$LINUX_GB" || die "--linux must be a number of GB or 'all' (got '$LINUX_GB')."
+			[ "$DATA_GB" = "all" ] || [ "$DATA_GB" = "none" ] || is_size "$DATA_GB" || die "--data must be a number of GB, 'all' or 'none' (got '$DATA_GB')."
+			case "$ESP_SIZE_MB" in ""|*[!0-9]*) die "--esp must be a whole number of MB (got '$ESP_SIZE_MB')." ;; esac
+			;;
+	esac
+}
 
-	unmount_storage
-
-	# 1. Clean existing target partitions
-	for p in data linux1 linux esp; do
-		n=$(part_num_by_name "$p")
-		[ -n "$n" ] && run_cmd sgdisk --delete="$n" "$DISK"
-	done
-	refresh_disk
-
-	# 2. Userdata start & shrink
-	SUPER_N=$(part_num_by_name super)
-	if [ -n "$SUPER_N" ]; then
-		SUPER_END=$(part_last_sector "$SUPER_N")
-		UD_START=$(( SUPER_END + 1 ))
-		_R=$(( UD_START % 8 ))
-		[ "$_R" -ne 0 ] && UD_START=$(( UD_START + 8 - _R ))
-	else
-		UD_START=3228640
-	fi
-
-	n=$(part_num_by_name userdata)
-	if [ -n "$n" ]; then
-		UD_NUM="$n"
-		run_cmd sgdisk --delete="$UD_NUM" "$DISK"
-	else
-		UD_NUM=15
-	fi
-
-	LAST_USABLE=$(last_usable_sector)
-	_USECT=$(sectors_for_gb "$USERDATA_GB")
-	NEW_UD_END=$(( UD_START + _USECT - 1 ))
-	NEW_UD_END=$(( NEW_UD_END - NEW_UD_END % 8 ))
-	[ "$NEW_UD_END" -lt "$LAST_USABLE" ] || die "Userdata size exceeds disk capacity."
-
-	say ">> Creating 'userdata' (part $UD_NUM): $UD_START..$NEW_UD_END (${USERDATA_GB} GB)"
-	run_cmd sgdisk --new="$UD_NUM:$UD_START:$NEW_UD_END" \
-	                --change-name="$UD_NUM:userdata" \
-	                --typecode="$UD_NUM:8300" "$DISK"
-
-	# 3. Create ESP
-	ESP_START=$(( NEW_UD_END + 1 ))
-	_R=$(( ESP_START % 8 )); [ "$_R" -ne 0 ] && ESP_START=$(( ESP_START + 8 - _R ))
+check_esp_size() {
 	ESP_SECT=$(sectors_for_mb "$ESP_SIZE_MB")
-	ESP_END=$(( ESP_START + ESP_SECT - 1 ))
-	[ "$ESP_END" -lt "$LAST_USABLE" ] || die "ESP does not fit in remaining space."
+	_min=$(esp_min_sectors)
+	[ "$ESP_SECT" -ge "$_min" ] || die \
+		"ESP of ${ESP_SIZE_MB} MB cannot hold a FAT32 on this disk (${SECSZ} B sectors): need at least $(( (_min * SECSZ + 1048575) / 1048576 )) MB, and the boot firmware refuses a smaller one."
+}
 
-	ESP_NUM=$(( UD_NUM + 1 ))
-	say ">> Creating 'esp' (part $ESP_NUM): $ESP_START..$ESP_END (${ESP_SIZE_MB} MB)"
-	run_cmd sgdisk --new="$ESP_NUM:$ESP_START:$ESP_END" \
-	                --change-name="$ESP_NUM:esp" \
-	                --typecode="$ESP_NUM:ef00" "$DISK"
-
-	# 4. Create Linux root
-	LIN_START=$(( ESP_END + 1 ))
-	_R=$(( LIN_START % 8 )); [ "$_R" -ne 0 ] && LIN_START=$(( LIN_START + 8 - _R ))
-	LIN_NUM=$(( ESP_NUM + 1 ))
-
-	if [ "$LINUX_GB" = "all" ]; then
-		LIN_END=$LAST_USABLE
-		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (remaining disk)"
-	else
-		_LSECT=$(sectors_for_gb "$LINUX_GB")
-		LIN_END=$(( LIN_START + _LSECT - 1 ))
-		[ "$LIN_END" -le "$LAST_USABLE" ] || die "Linux partition exceeds remaining space."
-		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (${LINUX_GB} GB)"
+# This tool does not manage the developer partition 'linux1' unless --dev is
+# given; leaving it in place would split the free space, so refuse instead.
+guard_linux1() {
+	if [ -n "$(part_num_by_name linux1)" ] && [ "$DEV_MODE" != 1 ]; then
+		die "A 'linux1' (developer install) partition exists. Re-run with --dev to replace it."
 	fi
-	run_cmd sgdisk --new="$LIN_NUM:$LIN_START:$LIN_END" \
-	                --change-name="$LIN_NUM:linux" \
-	                --typecode="$LIN_NUM:8300" "$DISK"
+}
 
-	# 5. Create Data (Linux extra / storage)
-	HAS_DATA=0
-	if [ "$LIN_END" -lt "$LAST_USABLE" ] && [ "$DATA_GB" != "none" ]; then
-		DAT_START=$(( LIN_END + 1 ))
-		_R=$(( DAT_START % 8 )); [ "$_R" -ne 0 ] && DAT_START=$(( DAT_START + 8 - _R ))
-		DAT_NUM=$(( LIN_NUM + 1 ))
-
-		if [ "$DATA_GB" = "all" ]; then
-			DAT_END=$LAST_USABLE
-			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (remaining disk)"
-		else
-			_DSECT=$(sectors_for_gb "$DATA_GB")
-			DAT_END=$(( DAT_START + _DSECT - 1 ))
-			[ "$DAT_END" -gt "$LAST_USABLE" ] && DAT_END=$LAST_USABLE
-			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (${DATA_GB} GB)"
+delete_named() {
+	for _dn in "$@"; do
+		_dnum=$(part_num_by_name "$_dn")
+		if [ -n "$_dnum" ]; then
+			say ">> Deleting '$_dn' (partition $_dnum)"
+			run_cmd sgdisk --delete="$_dnum" "$DISK"
+			DELETED="$DELETED $_dnum"
 		fi
-		run_cmd sgdisk --new="$DAT_NUM:$DAT_START:$DAT_END" \
-		                --change-name="$DAT_NUM:data" \
-		                --typecode="$DAT_NUM:8300" "$DISK"
-		HAS_DATA=1
-	fi
+	done
+}
 
-	# 6. Commit GPT
-	say ">> Relocating backup GPT to end of disk..."
+# Sets UD_NUM / UD_START / UD_HAD. Prefer the existing userdata's own start (so
+# nothing else is ever overwritten); fall back to "after super" only when it
+# is already gone.
+resolve_userdata_geometry() {
+	UD_HAD=0
+	_un=$(part_num_by_name userdata)
+	if [ -n "$_un" ]; then
+		UD_HAD=1
+		UD_NUM="$_un"
+		UD_START=$(part_first_sector "$_un")
+		[ -n "$UD_START" ] || die "Cannot read userdata geometry."
+		return 0
+	fi
+	_sn=$(part_num_by_name super)
+	[ -n "$_sn" ] || die "No 'userdata' and no 'super' partition found — cannot tell where Android's storage starts."
+	_se=$(part_last_sector "$_sn")
+	UD_START=$(align8_up $((_se + 1)))
+	UD_NUM=$(lowest_free_num "$DELETED")
+	say " !  No 'userdata' partition found; recreating it after 'super' (sector $UD_START)."
+}
+
+# last sector available to new partitions placed after sector $1
+gap_limit() {
+	_gn=$(next_start_after "$UD_NUM" "$DELETED" "$1")
+	if [ -n "$_gn" ] && [ "$_gn" -gt 0 ]; then
+		echo $((_gn - 1))
+	else
+		echo "$LAST_USABLE"
+	fi
+}
+
+# create_part <name> <num> <start> <end> <typecode>
+create_part() {
+	_cn=$1; _cnum=$2; _cs=$3; _ce=$4; _ct=$5
+	say ">> Creating '$_cn' (part $_cnum): $_cs..$_ce ($(mb_of_sectors $((_ce - _cs + 1))) MB)"
+	run_cmd sgdisk --new="$_cnum:$_cs:$_ce" --change-name="$_cnum:$_cn" --typecode="$_cnum:$_ct" "$DISK"
+	NEW_PARTS="$NEW_PARTS
+$_cnum $_cs $_ce $_cn"
+}
+
+begin_repartition() {
+	NEW_PARTS=""; DELETED=""
+	LAST_USABLE=$(last_usable_sector)
+	[ -n "$LAST_USABLE" ] || die "Cannot read disk geometry."
+	quiesce_begin
+	unmount_storage
+	drop_userdata_mapper
+}
+
+# esp + linux (+ data) laid out from $1 up to $2 (inclusive); $3 = slot cursor
+create_linux_partitions() {
+	_from=$1; _limit=$2; _cur=$3
+
+	ESP_END=$((_from + ESP_SECT - 1))
+	[ "$ESP_END" -le "$_limit" ] || die "ESP (${ESP_SIZE_MB} MB) does not fit in the remaining space."
+	ESP_NUM=$(next_slot "$DELETED" "$_cur")
+	create_part esp "$ESP_NUM" "$_from" "$ESP_END" ef00
+	_from=$(align8_up $((ESP_END + 1)))
+	_cur=$ESP_NUM
+
+	[ "$_from" -le "$_limit" ] || die "No space left for the Linux root partition."
+	LIN_NUM=$(next_slot "$DELETED" "$_cur")
+	if [ "$LINUX_GB" = "all" ]; then
+		LIN_END=$_limit
+	else
+		LIN_END=$(( _from + $(sectors_for_gb "$LINUX_GB") - 1 ))
+		LIN_END=$(( LIN_END - (LIN_END + 1) % 8 ))
+		[ "$LIN_END" -le "$_limit" ] || die "Linux root (${LINUX_GB} GB) does not fit — only $(gb_of_sectors $((_limit - _from + 1))) GB are free."
+	fi
+	create_part linux "$LIN_NUM" "$_from" "$LIN_END" 8300
+	_from=$(align8_up $((LIN_END + 1)))
+	_cur=$LIN_NUM
+
+	if [ "$DATA_GB" != "none" ] && [ "$_from" -le "$_limit" ]; then
+		DAT_NUM=$(next_slot "$DELETED" "$_cur")
+		if [ "$DATA_GB" = "all" ]; then
+			DAT_END=$_limit
+		else
+			DAT_END=$(( _from + $(sectors_for_gb "$DATA_GB") - 1 ))
+			[ "$DAT_END" -gt "$_limit" ] && DAT_END=$_limit
+		fi
+		create_part data "$DAT_NUM" "$_from" "$DAT_END" 8300
+	else
+		say "   (no 'data' partition: ${DATA_GB}, or no space left)"
+	fi
+}
+
+# finish_layout — commit the GPT, prove the kernel sees it, then (and only then)
+# touch the partitions themselves. Returns 0 ok / 1 error / RC_REBOOT.
+finish_layout() {
+	say ">> Relocating backup GPT to the end of the disk..."
 	run_cmd sgdisk --move-second-header "$DISK"
 	refresh_disk
 
 	if [ "$DRY_RUN" = 1 ]; then
+		say ""
 		say "Dry run complete. No modifications were written to disk."
 		return 0
 	fi
 
-	# 7. Format partitions
-	format_device vfat "$BYNAME/esp" "ERHAI_ESP"
-	if [ "$HAS_DATA" = 1 ]; then
-		format_device ext4 "$BYNAME/data" "data"
-	fi
-	if [ "$FORMAT_USERDATA" = 1 ]; then
-		format_device f2fs "$BYNAME/userdata" "userdata"
+	wipe_userdata_keys
+
+	_t=0
+	QUIET=1
+	while ! new_parts_visible && [ "$_t" -lt 5 ]; do
+		refresh_disk
+		_t=$((_t + 1))
+	done
+	QUIET=0
+	if ! new_parts_visible; then
+		say ""
+		say "======================================================================="
+		say " The new partition table is written, but the kernel is still using the"
+		say " old one (partitions on this disk are in use). NOTHING was formatted."
+		say ""
+		say "   1. Reboot recovery."
+		say "   2. Wipe -> Format Data -> yes   (rebuilds userdata)."
+		say "   3. esp / data can be formatted from Wipe, or the installer does it."
+		say "======================================================================="
+		return $RC_REBOOT
 	fi
 
-	# 8. Auto-mount without reboot
+	refresh_byname_symlinks
+
+	_nl='
+'
+	_oi=$IFS; IFS=$_nl
+	for _row in $NEW_PARTS; do
+		[ -n "$_row" ] || continue
+		IFS=$_oi
+		set -- $_row
+		scrub_partition "$4" || true
+		IFS=$_nl
+	done
+	IFS=$_oi
+
+	new_part_made esp  && { format_device vfat "$BYNAME/esp"  "ERHAI_ESP" || say "   (the installer will format esp instead)"; }
+	new_part_made data && { format_device ext4 "$BYNAME/data" "data"      || say "   (format 'data' later from Wipe)"; }
+
 	auto_mount_partitions
+	return 0
+}
 
+# ------------------------------------------------------------------ actions --
+
+apply_dualboot() {
+	say "=== Dual-Boot partitioning (Android + Linux) ==="
+	say "  Android userdata : ${USERDATA_GB} GB"
+	say "  esp              : ${ESP_SIZE_MB} MB (FAT32)"
+	say "  linux            : ${LINUX_GB} GB (left unformatted for the installer)"
+	say "  data             : ${DATA_GB}"
+	check_esp_size
+	guard_linux1
+	begin_repartition
+
+	delete_named esp linux data
+	[ "$DEV_MODE" = 1 ] && delete_named linux1
+	resolve_userdata_geometry
+	LIMIT=$(gap_limit "$UD_START")
+
+	NEW_UD_END=$(( UD_START + $(sectors_for_gb "$USERDATA_GB") - 1 ))
+	NEW_UD_END=$(( NEW_UD_END - (NEW_UD_END + 1) % 8 ))
+	[ "$NEW_UD_END" -lt "$LIMIT" ] || die "Userdata of ${USERDATA_GB} GB leaves no room for Linux (max $(gb_of_sectors $((LIMIT - UD_START))) GB)."
+
+	if [ "$UD_HAD" = 1 ]; then
+		say ">> Recreating 'userdata' (part $UD_NUM) at the same start, new size"
+		run_cmd sgdisk --delete="$UD_NUM" "$DISK"
+	fi
+	create_part userdata "$UD_NUM" "$UD_START" "$NEW_UD_END" 8300
+	create_linux_partitions "$(align8_up $((NEW_UD_END + 1)))" "$LIMIT" "$UD_NUM"
+
+	finish_layout || return $?
+	[ "$DRY_RUN" = 1 ] && return 0
 	say "========================================================================="
-	say "Dual-Boot partitioning completed and auto-mounted successfully!"
+	say "Partitioning done. userdata was recreated and holds NO usable filesystem."
+	say "Run Wipe -> Format Data (the recovery UI does this automatically), then"
+	say "reboot recovery. Android boots again as a factory-reset device."
 	say "========================================================================="
 }
 
 apply_linux_only() {
-	say "=== Executing Linux-Only Partitioning ==="
-	say "Configuration:"
-	say "  ESP          : ${ESP_SIZE_MB} MB"
-	say "  Linux Root   : ${LINUX_GB} GB"
-	say "  Linux Data   : ${DATA_GB}"
+	say "=== Linux-only partitioning (Android userdata is REMOVED) ==="
+	say "  esp   : ${ESP_SIZE_MB} MB (FAT32)"
+	say "  linux : ${LINUX_GB} GB (left unformatted for the installer)"
+	say "  data  : ${DATA_GB}"
+	check_esp_size
+	guard_linux1
+	begin_repartition
 
-	unmount_storage
+	delete_named esp linux data userdata
+	[ "$DEV_MODE" = 1 ] && delete_named linux1
+	resolve_userdata_geometry
+	DELETED="$DELETED $UD_NUM"
+	LIMIT=$(gap_limit "$UD_START")
 
-	# 1. Delete Android and old Linux partitions
-	for p in data linux1 linux esp userdata; do
-		n=$(part_num_by_name "$p")
-		[ -n "$n" ] && run_cmd sgdisk --delete="$n" "$DISK"
-	done
-	refresh_disk
+	create_linux_partitions "$UD_START" "$LIMIT" $((UD_NUM - 1))
 
-	SUPER_N=$(part_num_by_name super)
-	if [ -n "$SUPER_N" ]; then
-		SUPER_END=$(part_last_sector "$SUPER_N")
-		UD_START=$(( SUPER_END + 1 ))
-		_R=$(( UD_START % 8 ))
-		[ "$_R" -ne 0 ] && UD_START=$(( UD_START + 8 - _R ))
-	else
-		UD_START=3228640
-	fi
-	LAST_USABLE=$(last_usable_sector)
-
-	# 2. Create ESP at start of free space
-	ESP_START=$UD_START
-	ESP_SECT=$(sectors_for_mb "$ESP_SIZE_MB")
-	ESP_END=$(( ESP_START + ESP_SECT - 1 ))
-	ESP_NUM=15
-
-	say ">> Creating 'esp' (part $ESP_NUM): $ESP_START..$ESP_END (${ESP_SIZE_MB} MB)"
-	run_cmd sgdisk --new="$ESP_NUM:$ESP_START:$ESP_END" \
-	                --change-name="$ESP_NUM:esp" \
-	                --typecode="$ESP_NUM:ef00" "$DISK"
-
-	# 3. Create Linux root
-	LIN_START=$(( ESP_END + 1 ))
-	_R=$(( LIN_START % 8 )); [ "$_R" -ne 0 ] && LIN_START=$(( LIN_START + 8 - _R ))
-	LIN_NUM=$(( ESP_NUM + 1 ))
-
-	if [ "$LINUX_GB" = "all" ]; then
-		LIN_END=$LAST_USABLE
-		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (remaining disk)"
-	else
-		_LSECT=$(sectors_for_gb "$LINUX_GB")
-		LIN_END=$(( LIN_START + _LSECT - 1 ))
-		[ "$LIN_END" -le "$LAST_USABLE" ] || die "Linux partition exceeds disk capacity."
-		say ">> Creating 'linux' (part $LIN_NUM): $LIN_START..$LIN_END (${LINUX_GB} GB)"
-	fi
-	run_cmd sgdisk --new="$LIN_NUM:$LIN_START:$LIN_END" \
-	                --change-name="$LIN_NUM:linux" \
-	                --typecode="$LIN_NUM:8300" "$DISK"
-
-	# 4. Create Data if remaining space
-	HAS_DATA=0
-	if [ "$LIN_END" -lt "$LAST_USABLE" ] && [ "$DATA_GB" != "none" ]; then
-		DAT_START=$(( LIN_END + 1 ))
-		_R=$(( DAT_START % 8 )); [ "$_R" -ne 0 ] && DAT_START=$(( DAT_START + 8 - _R ))
-		DAT_NUM=$(( LIN_NUM + 1 ))
-
-		if [ "$DATA_GB" = "all" ]; then
-			DAT_END=$LAST_USABLE
-			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (remaining disk)"
-		else
-			_DSECT=$(sectors_for_gb "$DATA_GB")
-			DAT_END=$(( DAT_START + _DSECT - 1 ))
-			[ "$DAT_END" -gt "$LAST_USABLE" ] && DAT_END=$LAST_USABLE
-			say ">> Creating 'data' (part $DAT_NUM): $DAT_START..$DAT_END (${DATA_GB} GB)"
-		fi
-		run_cmd sgdisk --new="$DAT_NUM:$DAT_START:$DAT_END" \
-		                --change-name="$DAT_NUM:data" \
-		                --typecode="$DAT_NUM:8300" "$DISK"
-		HAS_DATA=1
-	fi
-
-	# 5. Commit GPT
-	say ">> Relocating backup GPT..."
-	run_cmd sgdisk --move-second-header "$DISK"
-	refresh_disk
-
-	if [ "$DRY_RUN" = 1 ]; then
-		say "Dry run complete. No modifications were written to disk."
-		return 0
-	fi
-
-	# 6. Format partitions
-	format_device vfat "$BYNAME/esp" "ERHAI_ESP"
-	if [ "$HAS_DATA" = 1 ]; then
-		format_device ext4 "$BYNAME/data" "data"
-	fi
-
-	# 7. Auto-mount without reboot
-	auto_mount_partitions
-
+	finish_layout || return $?
+	[ "$DRY_RUN" = 1 ] && return 0
 	say "========================================================================="
-	say "Linux-Only partitioning completed and auto-mounted successfully!"
+	say "Linux-only partitioning done. Android has no data partition now; use"
+	say "'Android Only' to restore it. Flash the Linux installer next."
 	say "========================================================================="
 }
 
 apply_android_only() {
-	say "=== Executing Android-Only Restore ==="
-	say "Restoring single continuous userdata partition..."
+	say "=== Android-only restore (single userdata partition) ==="
+	guard_linux1
+	begin_repartition
 
-	unmount_storage
+	delete_named esp linux data userdata
+	[ "$DEV_MODE" = 1 ] && delete_named linux1
+	resolve_userdata_geometry
+	DELETED="$DELETED $UD_NUM"
+	LIMIT=$(gap_limit "$UD_START")
 
-	# 1. Delete all Linux partitions and existing userdata
-	for p in data linux1 linux esp userdata; do
-		n=$(part_num_by_name "$p")
-		[ -n "$n" ] && run_cmd sgdisk --delete="$n" "$DISK"
-	done
-	refresh_disk
+	create_part userdata "$UD_NUM" "$UD_START" "$LIMIT" 8300
 
-	SUPER_N=$(part_num_by_name super)
-	if [ -n "$SUPER_N" ]; then
-		SUPER_END=$(part_last_sector "$SUPER_N")
-		UD_START=$(( SUPER_END + 1 ))
-		_R=$(( UD_START % 8 ))
-		[ "$_R" -ne 0 ] && UD_START=$(( UD_START + 8 - _R ))
-	else
-		UD_START=3228640
-	fi
-	UD_NUM=15
-
-	# 2. Create single full userdata from after super to end of disk
-	say ">> Creating full 'userdata' (part $UD_NUM): $UD_START..end of disk"
-	run_cmd sgdisk --new="$UD_NUM:$UD_START:0" \
-	                --change-name="$UD_NUM:userdata" \
-	                --typecode="$UD_NUM:8300" "$DISK"
-
-	# 3. Commit GPT
-	say ">> Relocating backup GPT..."
-	run_cmd sgdisk --move-second-header "$DISK"
-	refresh_disk
-
-	if [ "$DRY_RUN" = 1 ]; then
-		say "Dry run complete. No modifications were written to disk."
-		return 0
-	fi
-
-	# 4. Format userdata as F2FS
-	format_device f2fs "$BYNAME/userdata" "userdata"
-
-	# 5. Auto-mount without reboot
-	auto_mount_partitions
-
+	finish_layout || return $?
+	[ "$DRY_RUN" = 1 ] && return 0
 	say "========================================================================="
-	say "Android-Only restore completed and auto-mounted successfully!"
+	say "Android layout restored. userdata holds NO usable filesystem yet:"
+	say "run Wipe -> Format Data (the recovery UI does this automatically),"
+	say "reboot recovery, and put the stock boot image back if you replaced it."
 	say "========================================================================="
 }
 
-# -----------------------------------------------------------------------------
-# Interactive Menu (Mirroring erhai-setup_partitions.sh v1.2)
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------- interactive menu --
+
+ask_default() { # ask_default "prompt" default -> REPLY_VAL
+	printf "%s [default %s]: " "$1" "$2"
+	read -r REPLY_VAL
+	[ -n "$REPLY_VAL" ] || REPLY_VAL="$2"
+}
 
 interactive_menu() {
 	clear 2>/dev/null || true
 	say ""
 	say "======================================================================="
-	say "        OnePlus Pad 3 (erhai) — Linux partitioning utility"
+	say "        OnePlus erhai — Android / Linux partitioning utility"
 	say "                          by TheMojoMan"
 	say "======================================================================="
 	say ""
@@ -716,14 +790,13 @@ interactive_menu() {
 	fi
 	say ""
 	say " !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-	say " !! Android need to be reinstalled after size of userdata is changed !!"
-	say " !!             Backup all your data BEFORE proceeding               !!"
-	say " !!                                                                  !!"
-	say " !!         Press Ctrl + C at any time to cancel this setup          !!"
+	say " !! Android must be reinstalled / reset after userdata is changed.   !!"
+	say " !!             Back up all your data BEFORE proceeding.            !!"
+	say " !!         Press Ctrl + C at any time to cancel this setup.        !!"
 	say " !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 	say ""
 	say "Please choose:"
-	say " 1. Dry-run mode    -  simulates the setup, writes nothing yet"
+	say " 1. Dry-run mode    -  simulates the setup, writes nothing"
 	say " 2. Execution mode  -  alters the disk layout - DANGEROUS!"
 	printf "Selection [1/2, default 1]: "
 	read -r d
@@ -739,203 +812,102 @@ interactive_menu() {
 
 	show_layout
 
-	say "  1) Partition disk for LINUX"
-	say "  2) Restore ANDROID layout"
-	say "  3) Auto-mount partitions now (without partitioning)"
-	say "  4) Quit"
-	printf "Select [1/2/3/4]: "
+	say "  1) Dual boot   — shrink userdata, create esp + linux (+ data)"
+	say "  2) Linux only  — delete userdata, create esp + linux (+ data)"
+	say "  3) Android only— delete esp/linux/data, give userdata the whole space"
+	say "  4) Mount esp / linux / data now"
+	say "  5) Quit"
+	printf "Select [1-5]: "
 	read -r m
 
 	case "$m" in
 		1)
-			CLEAN_LIST="esp linux data"
-			[ "$DEV_MODE" = 1 ] && CLEAN_LIST="esp linux linux1 data"
-			DELETED=""
-			for p in $CLEAN_LIST; do
-				n=$(part_num_by_name "$p")
-				if [ -n "$n" ]; then
-					say ""
-					say "A partition named '$p' already exists (number $n)."
-					if confirm "Delete it"; then
-						run_cmd sgdisk --delete="$n" "$DISK"
-						DELETED="$DELETED $n"
-					fi
-				fi
-			done
-			refresh_disk
-
-			UD_ACTION="keep"
-			UD_END_NEW=0
-			if [ -z "$UD_NUM" ] || [ -z "$(part_first_sector "$UD_NUM")" ]; then
-				say "No 'userdata' partition — Android's data is already gone."
-				UD_ACTION="delete"
-			else
-				UD_START=$(part_first_sector "$UD_NUM")
-				UD_END=$(part_last_sector "$UD_NUM")
-				UD_SIZE_GB=$(gb_of_sectors $((UD_END - UD_START + 1)))
-				say ""
-				say "userdata is partition $UD_NUM, ${UD_SIZE_GB} GB"
-				say "  1) Shrink userdata, keep Android         [dual boot]"
-				say "  2) Delete userdata, remove Android       [Linux only]"
-				say "  3) Don't touch userdata                  [re-partition / testing]"
-				printf "Choice [1/2/3]: "
-				read -r c
-				case "$c" in
-					1)
-						printf "New userdata size in GB [default 64]: "
-						read -r nsz
-						[ -z "$nsz" ] && nsz=64
-						nsz=$(clean_size "$nsz")
-						USERDATA_GB="$nsz"
-						_USECT=$(sectors_for_gb "$nsz")
-						UD_END_NEW=$(( UD_START + _USECT - 1 ))
-						UD_END_NEW=$(( UD_END_NEW - UD_END_NEW % 8 ))
-						run_cmd sgdisk --delete="$UD_NUM" "$DISK"
-						run_cmd sgdisk --new="$UD_NUM:$UD_START:$UD_END_NEW" \
-						                --change-name="$UD_NUM:userdata" \
-						                --typecode="$UD_NUM:8300" "$DISK"
-						UD_ACTION="shrink"
-						;;
-					2)
-						confirm "Really delete Android's userdata" && {
-							run_cmd sgdisk --delete="$UD_NUM" "$DISK"
-							DELETED="$DELETED $UD_NUM"
-							UD_ACTION="delete"
-						}
-						;;
-					*) ;;
-				esac
-			fi
-			refresh_disk
-
-			FIRST=$(first_usable_sector)
-			LAST=$(last_usable_sector)
-			set -- $(plan_gap "$DELETED" "${UD_NUM:-0}" "$UD_ACTION" "$UD_END_NEW" "$FIRST" "$LAST")
-			GAP_START=$1
-			GAP_END=$2
-			_R=$(( GAP_START % 8 ))
-			[ "$_R" -ne 0 ] && GAP_START=$(( GAP_START + 8 - _R ))
-
-			ESP_SECT=$(sectors_for_mb "$ESP_SIZE_MB")
-			ESP_END=$(( GAP_START + ESP_SECT - 1 ))
-			ESP_N=$(next_slot "$DELETED" "${UD_NUM:-14}")
-			CUR=$ESP_N
-			run_cmd sgdisk --new="$ESP_N:$GAP_START:$ESP_END" \
-			                --change-name="$ESP_N:esp" --typecode="$ESP_N:ef00" "$DISK"
-			GAP_START=$(( ESP_END + 1 ))
-
-			printf "Linux root size in GB, or 'all' [default 40]: "
-			read -r lsz
-			[ -z "$lsz" ] && lsz=40
-			LIN_N=$(next_slot "$DELETED" "$CUR")
-			CUR=$LIN_N
-			if [ "$lsz" = "all" ]; then
-				LIN_END=$GAP_END
-			else
-				_LSECT=$(sectors_for_gb "$(clean_size "$lsz")")
-				LIN_END=$(( GAP_START + _LSECT - 1 ))
-			fi
-			run_cmd sgdisk --new="$LIN_N:$GAP_START:$LIN_END" \
-			                --change-name="$LIN_N:linux" --typecode="$LIN_N:8300" "$DISK"
-			GAP_START=$(( LIN_END + 1 ))
-
-			GAP_LEFT_GB=$(gb_of_sectors $((GAP_END - GAP_START + 1)))
-			if [ "$GAP_LEFT_GB" -gt 0 ]; then
-				if confirm "Create a separate 'data' partition with the rest (${GAP_LEFT_GB} GB)"; then
-					DAT_N=$(next_slot "$DELETED" "$CUR")
-					run_cmd sgdisk --new="$DAT_N:$GAP_START:$GAP_END" \
-					                --change-name="$DAT_N:data" --typecode="$DAT_N:8300" "$DISK"
-					DATA_MADE=1
-				fi
-			fi
-
-			run_cmd sgdisk --move-second-header "$DISK"
-			refresh_disk
-			show_layout
-
-			if [ "$DRY_RUN" = 0 ]; then
-				format_device vfat "$BYNAME/esp" "ERHAI_ESP"
-				[ "${DATA_MADE:-0}" = 1 ] && format_device ext4 "$BYNAME/data" "data"
-				[ "$UD_ACTION" = "shrink" ] && format_device f2fs "$BYNAME/userdata" "userdata"
-				auto_mount_partitions
-			fi
+			ask_default "New userdata size in GB" 64;       MODE_USERDATA="$REPLY_VAL"
+			ask_default "Linux root size in GB, or 'all'" 40; MODE_LINUX="$REPLY_VAL"
+			ask_default "Linux data size in GB, 'all' or 'none'" all; MODE_DATA="$REPLY_VAL"
+			USERDATA_GB="$MODE_USERDATA"; LINUX_GB="$MODE_LINUX"; DATA_GB="$MODE_DATA"
+			MODE=dualboot; validate_args
+			confirm "Existing esp/linux/data are deleted and re-created. Continue" || { say "Bye."; exit 0; }
+			apply_dualboot
 			;;
 		2)
-			apply_android_only
+			ask_default "Linux root size in GB, or 'all'" 40; LINUX_GB="$REPLY_VAL"
+			ask_default "Linux data size in GB, 'all' or 'none'" all; DATA_GB="$REPLY_VAL"
+			MODE=linux; validate_args
+			confirm "Android's userdata and existing esp/linux/data are deleted. Continue" || { say "Bye."; exit 0; }
+			apply_linux_only
 			;;
 		3)
-			auto_mount_partitions
+			MODE=android
+			confirm "All Linux partitions are deleted. Continue" || { say "Bye."; exit 0; }
+			apply_android_only
 			;;
-		*)
-			say "Bye."
-			exit 0
-			;;
+		4) auto_mount_partitions ;;
+		*) say "Bye."; exit 0 ;;
 	esac
 }
 
-# -----------------------------------------------------------------------------
-# Main Entry Point
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------- main --
 
 need_tool() {
 	command -v "$1" >/dev/null 2>&1 || die "Required tool '$1' not found."
 }
 
-need_tool sgdisk
-need_tool awk
+main() {
+	need_tool sgdisk
+	need_tool awk
 
-for _a in "$@"; do
-	[ "$_a" = "--dev" ] && DEV_MODE=1
-done
+	for _a in "$@"; do
+		[ "$_a" = "--dev" ] && DEV_MODE=1
+	done
 
-find_disk
+	find_disk
 
-while [ $# -gt 0 ]; do
-	case "$1" in
-		--mode)
-			MODE="$2"; shift 2 ;;
-		--userdata)
-			USERDATA_GB="$2"; shift 2 ;;
-		--linux)
-			LINUX_GB="$2"; shift 2 ;;
-		--data)
-			DATA_GB="$2"; shift 2 ;;
-		--esp)
-			ESP_SIZE_MB="$2"; shift 2 ;;
-		--execute)
-			DRY_RUN=0; shift ;;
-		--dry-run)
-			DRY_RUN=1; shift ;;
-		--mount|--auto-mount)
-			auto_mount_partitions; exit 0 ;;
-		--status)
-			show_layout; exit 0 ;;
-		--dev)
-			DEV_MODE=1; shift ;;
-		-h|--help)
-			echo "Usage: $0 [options]"
-			echo "  --mode <dualboot|linux|android>"
-			echo "  --userdata <GB>       Android userdata size in GB (default: 64)"
-			echo "  --linux <GB|all>      Linux root partition size in GB (default: 40)"
-			echo "  --data <GB|all|none>  Linux data partition size (default: all)"
-			echo "  --esp <MB>            ESP partition size in MB (default: 300)"
-			echo "  --execute             Execute disk changes (default is dry-run)"
-			echo "  --mount               Auto-mount partitions without repartitioning"
-			echo "  --status              Show current GPT disk layout"
-			exit 0
-			;;
-		*)
-			shift ;;
-	esac
-done
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--mode)       MODE="$2"; shift 2 ;;
+			--userdata)   USERDATA_GB="$2"; shift 2 ;;
+			--linux)      LINUX_GB="$2"; shift 2 ;;
+			--data)       DATA_GB="$2"; shift 2 ;;
+			--esp)        ESP_SIZE_MB="$2"; shift 2 ;;
+			--execute)    DRY_RUN=0; shift ;;
+			--dry-run)    DRY_RUN=1; shift ;;
+			--mount|--auto-mount) auto_mount_partitions; exit 0 ;;
+			--status)     show_layout; exit 0 ;;
+			--dev)        shift ;;
+			-h|--help)
+				echo "Usage: $0 [options]"
+				echo "  --mode <dualboot|linux|android>"
+				echo "  --userdata <GB>       Android userdata size (dualboot, default 64)"
+				echo "  --linux <GB|all>      Linux root size (default 40)"
+				echo "  --data <GB|all|none>  Linux data size (default all)"
+				echo "  --esp <MB>            ESP size (default 300, minimum enforced)"
+				echo "  --execute             Write changes (default is dry-run)"
+				echo "  --mount               Mount esp/linux/data"
+				echo "  --status              Show the GPT layout"
+				echo "  --dev                 Also manage the 'linux1' developer partition"
+				exit 0
+				;;
+			*) shift ;;
+		esac
+	done
 
-if [ -z "$MODE" ]; then
-	interactive_menu
-else
-	case "$MODE" in
-		both|dualboot) apply_dualboot ;;
-		linux|ubuntu)  apply_linux_only ;;
-		android)       apply_android_only ;;
-		*) die "Unknown mode: $MODE (must be dualboot, linux, or android)" ;;
-	esac
-fi
+	validate_args
+
+	_rc=0
+	if [ -z "$MODE" ]; then
+		interactive_menu
+		_rc=$?
+	else
+		case "$MODE" in
+			both|dualboot) apply_dualboot; _rc=$? ;;
+			linux|ubuntu)  apply_linux_only; _rc=$? ;;
+			android)       apply_android_only; _rc=$? ;;
+		esac
+	fi
+	quiesce_end
+	exit "$_rc"
+}
+
+# ERHAI_TEST_SOURCE=1 lets the test harness source the functions without running.
+[ "${ERHAI_TEST_SOURCE:-0}" = 1 ] || main "$@"
